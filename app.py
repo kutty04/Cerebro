@@ -425,10 +425,13 @@ async def ingest_repo(request: IngestRequest):
         # 1. Clone the repo
         git.Repo.clone_from(request.repo_url, temp_dir, depth=1)
         
+        # Extract repo name from URL (e.g., https://github.com/user/repo.git -> repo)
+        repo_name = request.repo_url.rstrip("/").split("/")[-1].replace(".git", "")
+        
         # 2. Initialize Indexer
         # We pass temp_dir as the repos_path. 
         # CodeIndexer.scan_repos will treat temp_dir as the root.
-        indexer = CodeIndexer(repos_path=temp_dir, repo_url=request.repo_url)
+        indexer = CodeIndexer(repos_path=temp_dir, repo_url=request.repo_url, repo_name=repo_name)
         if not indexer.initialize():
             raise HTTPException(status_code=500, detail="Indexer initialization failed")
         

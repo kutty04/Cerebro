@@ -69,7 +69,7 @@ SKIP_FOLDERS = {
 
 
 class CodeIndexer:
-    def __init__(self, repos_path: str = None, repo_url: str = None):
+    def __init__(self, repos_path: str = None, repo_url: str = None, repo_name: str = None):
         self.embedder = None
         self.db = None
         self.indexed_count = 0
@@ -78,6 +78,7 @@ class CodeIndexer:
         self.user_id = None
         self.repos_path = repos_path or REPOS_PATH
         self.repo_url = repo_url
+        self.repo_name = repo_name
 
     def initialize(self) -> bool:
         """Initialize embedder and database connection"""
@@ -176,7 +177,8 @@ class CodeIndexer:
 
             # Get repo name (first folder under self.repos_path)
             repo_path = Path(root).relative_to(self.repos_path)
-            repo_name = str(repo_path).split(os.sep)[0] if str(repo_path) != "." else "unknown"
+            # Use explicit repo_name if provided, otherwise fallback to path logic
+            repo_name = self.repo_name or (str(repo_path).split(os.sep)[0] if str(repo_path) != "." else "unknown")
 
             for file in files:
                 file_path = os.path.join(root, file)
@@ -238,7 +240,8 @@ class CodeIndexer:
         headers = {"Authorization": f"Bearer {hf_token}"}
         
         try:
-            response = requests.post(api_url, headers=headers, json={"inputs": [text]}, timeout=15)
+            # Increased timeout to 30s to prevent Read timed out errors
+            response = requests.post(api_url, headers=headers, json={"inputs": [text]}, timeout=30)
             if response.status_code == 200:
                 res = response.json()
                 if isinstance(res, list) and len(res) > 0 and isinstance(res[0], list):
