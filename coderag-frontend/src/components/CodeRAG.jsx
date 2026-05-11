@@ -100,7 +100,6 @@ export default function Cerebro({ user }) {
 
   const fetchDashboardData = async () => {
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
       const [res1, res2] = await Promise.all([
         fetch(`${apiUrl}/analytics`),
         fetch(`${apiUrl}/history`)
@@ -118,7 +117,6 @@ export default function Cerebro({ user }) {
   const fetchUserRepos = async () => {
     setRepoLoading(true);
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
       const res = await fetch(`${apiUrl}/user-repos?user_id=${user.id}`);
       const data = await res.json();
       setUserRepos(data.repos || []);
@@ -133,7 +131,6 @@ export default function Cerebro({ user }) {
     if (!confirm(`Are you sure you want to delete ${repoName}? This cannot be undone.`)) return;
     
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
       const res = await fetch(`${apiUrl}/delete-repo?repo_name=${repoName}&user_id=${user.id}`, { method: 'POST' });
       if (res.ok) {
         setUserRepos(prev => prev.filter(r => r !== repoName));
@@ -199,7 +196,6 @@ export default function Cerebro({ user }) {
     setResults(null);
 
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
       const response = await fetch(`${apiUrl}/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
