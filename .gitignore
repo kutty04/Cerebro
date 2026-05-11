@@ -1,0 +1,9 @@
+venv/
+venv311/
+__pycache__/
+*.pyc
+.env
+coderag_telemetry.db
+.DS_Store
+node_modules/
+dist/
