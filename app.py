@@ -109,26 +109,24 @@ async def health_check():
         "hf_ready": os.getenv("HF_TOKEN") is not None,
         "mode": "serverless"
     }
-
-
 import requests
-
-def get_embedding(text: str):
-    """Get embeddings from Hugging Face Inference API"""
+def get_embedding(text: str) -> list:
     hf_token = os.getenv("HF_TOKEN")
     model_id = "sentence-transformers/all-MiniLM-L6-v2"
-    api_url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{model_id}"
+    api_url = f"https://router.huggingface.co/hf-inference/models/{model_id}/pipeline/feature-extraction"
     headers = {"Authorization": f"Bearer {hf_token}"}
-    
     try:
-        response = requests.post(api_url, headers=headers, json={"inputs": text}, timeout=15)
+        response = requests.post(api_url, headers=headers, json={"inputs": [text]}, timeout=10)
         if response.status_code == 200:
-            return response.json()
-        else:
-            logger.error(f"HF Embedding Error: {response.text}")
-            return None
+            res = response.json()
+            if isinstance(res, list) and len(res) > 0 and isinstance(res[0], list):
+                return res[0]
+            elif isinstance(res, list) and len(res) > 0:
+                return res
+            return res
+        return None
     except Exception as e:
-        logger.error(f"Embedding Exception: {e}")
+        logger.error(f"Embedding failed: {e}")
         return None
 
 # Search endpoint
