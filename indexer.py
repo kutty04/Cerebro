@@ -1,14 +1,15 @@
 import os
 import sys
 from pathlib import Path
-from sentence_transformers import SentenceTransformer
 import supabase
 import logging
 from typing import List, Tuple
 import json
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,12 +83,13 @@ class CodeIndexer:
         logger.info("🚀 Initializing CodeIndexer...")
 
         try:
-            # Load embedder
-            logger.info("📦 Loading embedding model...")
-            self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
-            logger.info("✅ Embedder loaded")
+            # Check HF Token
+            if not os.getenv("HF_TOKEN"):
+                logger.error("❌ Missing HF_TOKEN environment variable for serverless embeddings")
+                return False
+            logger.info("✅ Embedder configured (Serverless)")
         except Exception as e:
-            logger.error(f"❌ Failed to load embedder: {e}")
+            logger.error(f"❌ Failed to configure serverless embedder: {e}")
             return False
 
         try:
@@ -220,6 +222,24 @@ class CodeIndexer:
         logger.info(f"📊 Total snippets found: {len(snippets)}")
         return snippets
 
+    def get_serverless_embedding(self, text: str) -> List[float]:
+        """Get embeddings from Hugging Face Inference API"""
+        hf_token = os.getenv("HF_TOKEN")
+        model_id = "sentence-transformers/all-MiniLM-L6-v2"
+        api_url = f"https://api-inference.huggingface.co/models/{model_id}"
+        headers = {"Authorization": f"Bearer {hf_token}"}
+        
+        try:
+            response = requests.post(api_url, headers=headers, json={"inputs": text}, timeout=15)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"HF Embedding Error: {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"Embedding Exception: {e}")
+            return None
+
     def index_snippets(self, snippets: List[dict]) -> None:
         """Generate embeddings and index snippets in Supabase"""
         if not snippets:
@@ -231,7 +251,12 @@ class CodeIndexer:
         for i, snippet in enumerate(snippets, 1):
             try:
                 # Generate embedding
-                embedding = self.embedder.encode(snippet["code_content"]).tolist()
+                embedding = self.get_serverless_embedding(snippet["code_content"])
+                
+                if not embedding:
+                    logger.warning(f"⚠️ Skipping snippet {i}: Failed to generate embedding")
+                    self.failed_count += 1
+                    continue
 
                 # Prepare data for Supabase
                 data = {
