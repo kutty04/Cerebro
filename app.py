@@ -98,15 +98,17 @@ class HealthResponse(BaseModel):
     embedder_ready: bool
     supabase_ready: bool
     hf_ready: bool
-
+    mode: str
 
 # Health check endpoint
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
+    is_hf_ready = os.getenv("HF_TOKEN") is not None
     return {
         "status": "ok",
+        "embedder_ready": is_hf_ready, # In serverless mode, if HF is ready, embedder is ready
         "supabase_ready": db is not None,
-        "hf_ready": os.getenv("HF_TOKEN") is not None,
+        "hf_ready": is_hf_ready,
         "mode": "serverless"
     }
 import requests
