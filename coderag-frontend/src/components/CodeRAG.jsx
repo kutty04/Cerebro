@@ -56,6 +56,8 @@ export default function Cerebro({ user }) {
   const [ingestUrl, setIngestUrl] = useState('');
   const [ingestStatus, setIngestStatus] = useState({ loading: false, error: '', success: '' });
 
+  const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
   const handleIngest = async (e) => {
     e.preventDefault();
     if (!ingestUrl.trim()) return;
