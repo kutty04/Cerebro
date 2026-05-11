@@ -1,8 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
-from huggingface_hub import InferenceClient
 import supabase
 import os
 from typing import Optional
@@ -35,7 +33,7 @@ except Exception as e:
 
 @app.on_event("startup")
 async def startup_event():
-    global embedder, db
+    global db
     logger.info("🚀 Starting CodeRAG API initialization...")
     
     # 1. Init Telemetry DB
@@ -57,13 +55,7 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Supabase init failed: {e}")
 
-    # 3. Load Embedder
-    try:
-        logger.info("⏳ Loading SentenceTransformer (this may take a minute on first run)...")
-        embedder = SentenceTransformer("all-MiniLM-L6-v2")
-        logger.info("✅ Embedder loaded successfully")
-    except Exception as e:
-        logger.error(f"❌ Embedder failed: {e}")
+    logger.info("✅ System ready (Using Serverless Embeddings)")
 
 # Add CORS middleware
 app.add_middleware(
@@ -108,9 +100,9 @@ class HealthResponse(BaseModel):
 async def health_check():
     return {
         "status": "ok",
-        "embedder_ready": embedder is not None,
         "supabase_ready": db is not None,
-        "hf_ready": HF_TOKEN is not None,
+        "hf_ready": os.getenv("HF_TOKEN") is not None,
+        "mode": "serverless"
     }
 
 
@@ -120,8 +112,8 @@ async def search(request: SearchRequest):
     """
     Search codebases using vector similarity + LLM generation
     """
-    if not embedder or not db:
-        raise HTTPException(status_code=500, detail="System not initialized")
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not initialized")
 
     start_time = time.time()
     
@@ -140,9 +132,10 @@ async def search(request: SearchRequest):
         )
 
     try:
-        # Step 1: Embed the query
-        logger.info(f"🔍 Embedding query: {request.query}")
-        query_embedding = embedder.encode(request.query).tolist()
+        # Step 1: Embed Query (Serverless)
+        query_embedding = get_embedding(request.query)
+        if not query_embedding:
+            raise HTTPException(status_code=500, detail="Failed to generate embedding")
 
         # Step 2: Search pgvector (Semantic)
         logger.info("📚 Searching vector database...")
