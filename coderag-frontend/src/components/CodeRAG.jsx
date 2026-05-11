@@ -545,11 +545,11 @@ export default function Cerebro({ user }) {
                   <div className="terminal-body">
                     {ingestStatus.logs.map((log, i) => (
                       <div key={i} className="terminal-line animate-slide-in">
-                        <span className="terminal-prompt">></span> {log}
+                        <span className="terminal-prompt">&gt;</span> {log}
                       </div>
                     ))}
                     <div className="terminal-line pulse-line">
-                      <span className="terminal-prompt">></span> _
+                      <span className="terminal-prompt">&gt;</span> _
                     </div>
                   </div>
                 </div>
