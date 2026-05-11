@@ -10,7 +10,8 @@ export default function NeuralMap({ user }) {
   const fetchGraphData = async () => {
     setLoading(true);
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
       const res = await fetch(`${apiUrl}/graph-data?user_id=${user.id}`);
       if (!res.ok) throw new Error('Graph data endpoint not found. Restart your backend!');
       const data = await res.json();
