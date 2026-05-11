@@ -54,17 +54,26 @@ export default function Cerebro({ user }) {
   const [chatContext, setChatContext] = useState([]);
   const [showIngestModal, setShowIngestModal] = useState(false);
   const [ingestUrl, setIngestUrl] = useState('');
-  const [ingestStatus, setIngestStatus] = useState({ loading: false, error: '', success: '' });
+  const [ingestStatus, setIngestStatus] = useState({ loading: false, error: '', success: '', logs: [] });
 
-  const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
+
+  const addLog = (msg) => {
+    setIngestStatus(prev => ({ ...prev, logs: [...prev.logs, msg] }));
+  };
 
   const handleIngest = async (e) => {
     e.preventDefault();
     if (!ingestUrl.trim()) return;
 
-    setIngestStatus({ loading: true, error: '', success: '' });
+    setIngestStatus({ loading: true, error: '', success: '', logs: ['📡 Connecting to Neural Core...'] });
+    
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      setTimeout(() => addLog('🧬 Initializing repository clone...'), 800);
+      setTimeout(() => addLog('📁 Scanning file structure...'), 1800);
+      setTimeout(() => addLog('🧠 Generating semantic embeddings...'), 3500);
+
       const response = await fetch(`${apiUrl}/ingest`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -526,11 +535,23 @@ export default function Cerebro({ user }) {
               </form>
 
               {ingestStatus.loading && (
-                <div className="ingest-progress">
-                  <div className="progress-bar-container">
-                    <div className="progress-bar-fill"></div>
+                <div className="neural-log-container">
+                  <div className="terminal-header">
+                    <div className="dot red"></div>
+                    <div className="dot yellow"></div>
+                    <div className="dot green"></div>
+                    <span className="terminal-title">Neural Status Terminal</span>
                   </div>
-                  <span>Cloning and Vectorizing... This may take a moment.</span>
+                  <div className="terminal-body">
+                    {ingestStatus.logs.map((log, i) => (
+                      <div key={i} className="terminal-line animate-slide-in">
+                        <span className="terminal-prompt">></span> {log}
+                      </div>
+                    ))}
+                    <div className="terminal-line pulse-line">
+                      <span className="terminal-prompt">></span> _
+                    </div>
+                  </div>
                 </div>
               )}
 

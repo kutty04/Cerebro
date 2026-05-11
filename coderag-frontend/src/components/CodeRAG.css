@@ -865,3 +865,92 @@
   font-size: 0.8rem;
   text-align: right;
 }
+
+
+/* Neural Status Terminal Styles */
+.neural-log-container {
+  margin-top: 1.5rem;
+  background: #020617;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 0 30px rgba(0, 0, 0, 0.5);
+  animation: slideUp 0.4s ease;
+}
+
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.terminal-header {
+  background: #1e293b;
+  padding: 0.6rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-bottom: 1px solid rgba(56, 189, 248, 0.1);
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.dot.red { background: #ff5f56; }
+.dot.yellow { background: #ffbd2e; }
+.dot.green { background: #27c93f; }
+
+.terminal-title {
+  color: #94a3b8;
+  font-size: 0.75rem;
+  font-family: 'Fira Code', monospace;
+  margin-left: 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.terminal-body {
+  padding: 1.2rem;
+  font-family: 'Fira Code', monospace;
+  font-size: 0.85rem;
+  color: #38bdf8;
+  height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.terminal-prompt {
+  color: #818cf8;
+  font-weight: bold;
+}
+
+.terminal-line {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.animate-slide-in {
+  animation: logSlideIn 0.3s ease forwards;
+}
+
+@keyframes logSlideIn {
+  from { transform: translateX(-10px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.pulse-line {
+  color: #38bdf8;
+  animation: blink 1s infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.ingest-modal {
+  max-width: 600px !important;
+}
