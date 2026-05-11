@@ -17,13 +17,53 @@ from indexer import CodeIndexer
 from telemetry import init_db, log_search, save_chat, get_analytics, get_chat_history, get_cached_query, set_cached_query
 
 load_dotenv(override=True)
-init_db()
+
+# Global variables for lazy loading
+embedder = None
+db = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
-app = FastAPI(title="CodeRAG API")
+try:
+    app = FastAPI(title="CodeRAG API")
+    logger.info("🚀 Starting CodeRAG API...")
+except Exception as e:
+    logger.error(f"💥 Failed to initialize FastAPI: {e}")
+    raise
+
+@app.on_event("startup")
+async def startup_event():
+    global embedder, db
+    logger.info("🚀 Starting CodeRAG API initialization...")
+    
+    # 1. Init Telemetry DB
+    try:
+        init_db()
+        logger.info("✅ Telemetry DB initialized")
+    except Exception as e:
+        logger.error(f"❌ Telemetry DB failed: {e}")
+
+    # 2. Init Supabase
+    try:
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_KEY")
+        if url and key:
+            db = supabase.create_client(url, key)
+            logger.info("✅ Supabase client initialized")
+        else:
+            logger.warning("⚠️ Supabase credentials missing!")
+    except Exception as e:
+        logger.error(f"❌ Supabase init failed: {e}")
+
+    # 3. Load Embedder
+    try:
+        logger.info("⏳ Loading SentenceTransformer (this may take a minute on first run)...")
+        embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.info("✅ Embedder loaded successfully")
+    except Exception as e:
+        logger.error(f"❌ Embedder failed: {e}")
 
 # Add CORS middleware
 app.add_middleware(
@@ -33,29 +73,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Initialize models and clients
-try:
-    embedder = SentenceTransformer("all-MiniLM-L6-v2")
-    logger.info("✅ Embedder loaded successfully")
-except Exception as e:
-    logger.error(f"❌ Failed to load embedder: {e}")
-    embedder = None
-
-# Initialize Groq configuration
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-# Initialize Supabase client
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-if SUPABASE_URL and SUPABASE_KEY:
-    db = supabase.create_client(SUPABASE_URL, SUPABASE_KEY)
-    logger.info("✅ Supabase client initialized")
-else:
-    logger.error("❌ Missing Supabase credentials")
-    db = None
-
 
 # Pydantic models
 class SearchRequest(BaseModel):
