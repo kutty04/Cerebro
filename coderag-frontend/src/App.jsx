@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from './supabaseClient';
 import Auth from './components/Auth';
 import Cerebro from './components/CodeRAG';
+import LandingPage from './components/LandingPage';
 import './index.css';
 
 export default function App() {
@@ -34,7 +35,7 @@ export default function App() {
 
   return (
     <div className="app-container">
-      {!session ? <Auth /> : <Cerebro user={session.user} />}
+      {!session ? <LandingPage /> : <Cerebro user={session.user} />}
     </div>
   );
 }
