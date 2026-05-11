@@ -268,7 +268,12 @@ FOLLOW_UPS:
 
         import requests
         try:
-            current_key = os.getenv("HF_TOKEN").strip()
+            hf_env_token = os.getenv("HF_TOKEN")
+            current_key = hf_env_token.strip() if hf_env_token else ""
+            
+            if not current_key:
+                logger.error("❌ HF_TOKEN is missing from environment variables!")
+                return {"answer": "Error: AI Brain (HF_TOKEN) is not configured on the server. Please check environment variables.", "confidence": 0, "sources": []}
             url = "https://router.huggingface.co/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {current_key}",
