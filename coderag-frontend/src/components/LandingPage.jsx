@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Terminal, Brain, Share2, Shield, Zap, ChevronRight, Github } from 'lucide-react';
+import { Terminal, Brain, Share2, Shield, Zap, ChevronRight, GitBranch } from 'lucide-react';
 import Auth from './Auth';
 
 export default function LandingPage() {
@@ -37,7 +37,7 @@ export default function LandingPage() {
           onClick={() => setShowAuth(true)}
           style={{ padding: '1rem 2.5rem', fontSize: '1.1rem', gap: '1rem' }}
         >
-          <Github size={20} /> Initiate Neural Link <ChevronRight size={20} />
+          <GitBranch size={20} /> Initiate Neural Link <ChevronRight size={20} />
         </button>
       </div>
 
