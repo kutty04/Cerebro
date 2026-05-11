@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from './supabaseClient';
-import Auth from './components/Auth';
 import Cerebro from './components/CodeRAG';
 import LandingPage from './components/LandingPage';
+import './components/CodeRAG.css'; // Ensure button styles are available
 import './index.css';
 
 export default function App() {

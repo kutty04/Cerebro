@@ -33,7 +33,7 @@ export default function LandingPage() {
         </p>
         
         <button 
-          className="ingest-btn" 
+          className="ingest-submit-btn" 
           onClick={() => setShowAuth(true)}
           style={{ padding: '1rem 2.5rem', fontSize: '1.1rem', gap: '1rem' }}
         >

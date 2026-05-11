@@ -169,28 +169,10 @@ export default function Cerebro({ user }) {
       cleanPath = cleanPath.substring(repo.length + 1);
     }
 
-    // CONFIG: Map your repositories here (fallback for local development)
-    const repoMap = {
-      'F1-intelligence': { type: 'local', path: 'C:/Users/R.Murugesan/OneDrive/Desktop/coderag-data/F1-intelligence' },
-      'focussense-ai': { type: 'github', url: 'https://github.com/rmurugesan/focussense-ai' },
-      'ipl': { type: 'github', url: 'https://github.com/rmurugesan/ipl' }
-    };
-
-    const config = repoMap[repo];
-    
-    if (config && config.type === 'github') {
-      return { 
-        link: `${config.url}/blob/main/${cleanPath}`, 
-        label: 'GitHub',
-        icon: <ExternalLink size={14} />
-      };
-    }
-    
-    // Default to local VS Code Link (Fallback)
-    const localBasePath = config?.path || `C:/Users/R.Murugesan/OneDrive/Desktop/coderag-data/${repo}`;
+    // Fallback if no cloud URL is available
     return { 
-      link: `vscode://file/${localBasePath}/${cleanPath}`, 
-      label: 'VS Code',
+      link: '#', 
+      label: 'Cloud Only',
       icon: <Terminal size={14} />
     };
   };
@@ -358,9 +340,9 @@ export default function Cerebro({ user }) {
                 className="repo-select"
               >
                 <option value="">All Projects</option>
-                <option value="F1-intelligence">F1 Intelligence</option>
-                <option value="focussense-ai">FocusSense AI</option>
-                <option value="ipl">IPL Predictor</option>
+                {userRepos.map(repo => (
+                  <option key={repo} value={repo}>{repo}</option>
+                ))}
               </select>
               <button type="submit" disabled={loading} className="search-button">
                 {loading ? <Zap className="spin" /> : 'Connect'}
