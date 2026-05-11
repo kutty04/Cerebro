@@ -69,7 +69,7 @@ SKIP_FOLDERS = {
 
 
 class CodeIndexer:
-    def __init__(self, repos_path: str = None):
+    def __init__(self, repos_path: str = None, repo_url: str = None):
         self.embedder = None
         self.db = None
         self.indexed_count = 0
@@ -77,6 +77,7 @@ class CodeIndexer:
         self.snippets_to_index = []
         self.user_id = None
         self.repos_path = repos_path or REPOS_PATH
+        self.repo_url = repo_url
 
     def initialize(self) -> bool:
         """Initialize embedder and database connection"""
@@ -203,12 +204,19 @@ class CodeIndexer:
                     chunks = self.chunk_code(code, file_path)
 
                     for chunk_text, start_line in chunks:
+                        # Construct a real source URL if it's a GitHub repo
+                        source_url = self.repo_url if self.repo_url else f"file://{file_path}"
+                        if self.repo_url and "github.com" in self.repo_url:
+                            # Remove .git suffix if present
+                            base_url = self.repo_url.replace(".git", "")
+                            source_url = f"{base_url}/blob/main/{rel_file_path}#L{start_line}"
+
                         snippet = {
                             "repo_name": repo_name,
                             "file_path": rel_file_path,
                             "language": language,
                             "code_content": chunk_text,
-                            "source_url": f"file://{file_path}",
+                            "source_url": source_url,
                             "start_line": start_line,
                         }
                         snippets.append(snippet)

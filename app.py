@@ -426,7 +426,7 @@ async def ingest_repo(request: IngestRequest):
         # 2. Initialize Indexer
         # We pass temp_dir as the repos_path. 
         # CodeIndexer.scan_repos will treat temp_dir as the root.
-        indexer = CodeIndexer(repos_path=temp_dir)
+        indexer = CodeIndexer(repos_path=temp_dir, repo_url=request.repo_url)
         if not indexer.initialize():
             raise HTTPException(status_code=500, detail="Indexer initialization failed")
         

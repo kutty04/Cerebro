@@ -154,13 +154,22 @@ export default function Cerebro({ user }) {
     }
   }, [view]);
 
-  const getSourceInfo = (repo, filepath) => {
+  const getSourceInfo = (repo, filepath, dbUrl) => {
+    // If we have a real URL from the database, use it! (SaaS / Production Mode)
+    if (dbUrl && dbUrl.startsWith('http')) {
+      return {
+        link: dbUrl,
+        label: dbUrl.includes('github.com') ? 'GitHub' : 'External',
+        icon: <ExternalLink size={14} />
+      };
+    }
+
     let cleanPath = filepath.replace(/\\/g, '/');
     if (cleanPath.startsWith(`${repo}/`)) {
       cleanPath = cleanPath.substring(repo.length + 1);
     }
 
-    // CONFIG: Map your repositories here (either local paths or github urls)
+    // CONFIG: Map your repositories here (fallback for local development)
     const repoMap = {
       'F1-intelligence': { type: 'local', path: 'C:/Users/R.Murugesan/OneDrive/Desktop/coderag-data/F1-intelligence' },
       'focussense-ai': { type: 'github', url: 'https://github.com/rmurugesan/focussense-ai' },
@@ -177,7 +186,7 @@ export default function Cerebro({ user }) {
       };
     }
     
-    // Default to local VS Code Link
+    // Default to local VS Code Link (Fallback)
     const localBasePath = config?.path || `C:/Users/R.Murugesan/OneDrive/Desktop/coderag-data/${repo}`;
     return { 
       link: `vscode://file/${localBasePath}/${cleanPath}`, 
@@ -432,7 +441,7 @@ export default function Cerebro({ user }) {
                           <span className="file-path">/{source.file}</span>
                         </div>
                         {(() => {
-                          const sourceInfo = getSourceInfo(source.repo, source.file);
+                          const sourceInfo = getSourceInfo(source.repo, source.file, source.url);
                           return (
                             <a 
                               href={sourceInfo.link} 
