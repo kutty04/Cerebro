@@ -186,3 +186,152 @@
   color: #f87171;
   border: 1px solid rgba(239, 68, 68, 0.2);
 }
+
+/* ============================================================
+   AUTH MOBILE RESPONSIVENESS — PRODUCTION GRADE
+   Breakpoints: 320, 360, 375, 390, 414, 480, 768
+   Appended below ALL desktop styles — desktop untouched above
+   ============================================================ */
+
+/* --- Global overflow-wrap for Auth text containers --- */
+.auth-card p,
+.auth-card span,
+.auth-card label,
+.auth-card h1,
+.auth-header p {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* --- 768px and below --- */
+@media (max-width: 768px) {
+  .auth-container {
+    padding: 1.5rem 1rem;
+    align-items: flex-start;
+    padding-top: 4rem;
+  }
+
+  .auth-card {
+    max-width: 100%;
+    padding: 2.25rem 1.5rem;
+    border-radius: 20px;
+  }
+
+  .auth-header h1 {
+    font-size: clamp(1.5rem, 6vw, 2rem);
+    letter-spacing: 3px;
+  }
+
+  .input-group input {
+    padding: 0.9rem 1rem 0.9rem 3rem;
+    font-size: 1rem;
+    min-height: 48px;
+  }
+
+  .auth-button {
+    min-height: 48px;
+    padding: 1rem;
+    font-size: 1rem;
+  }
+
+  .github-button {
+    min-height: 48px;
+    padding: 0.9rem;
+    font-size: 0.95rem;
+  }
+}
+
+/* --- 480px and below --- */
+@media (max-width: 480px) {
+  .auth-container {
+    padding-top: 3rem;
+  }
+
+  .auth-card {
+    padding: 2rem 1.25rem;
+    border-radius: 18px;
+  }
+
+  .auth-header h1 {
+    font-size: clamp(1.4rem, 7vw, 1.8rem);
+    letter-spacing: 2px;
+  }
+
+  .auth-header p {
+    font-size: clamp(0.8rem, 3vw, 0.9rem);
+  }
+}
+
+/* --- 414px and below --- */
+@media (max-width: 414px) {
+  .auth-card {
+    padding: 1.75rem 1.1rem;
+  }
+
+  .input-group input {
+    font-size: 0.95rem;
+  }
+
+  .auth-footer button {
+    font-size: 0.8rem;
+  }
+}
+
+/* --- 390px and below (iPhone 14 Pro) --- */
+@media (max-width: 390px) {
+  .auth-card {
+    padding: 1.5rem 1rem;
+    border-radius: 16px;
+  }
+
+  .auth-header h1 {
+    font-size: clamp(1.25rem, 7.5vw, 1.6rem);
+  }
+}
+
+/* --- 375px and below (iPhone SE / 13 mini) --- */
+@media (max-width: 375px) {
+  .auth-card {
+    padding: 1.5rem 0.9rem;
+  }
+}
+
+/* --- 360px and below (small Android) --- */
+@media (max-width: 360px) {
+  .auth-card {
+    padding: 1.25rem 0.85rem;
+  }
+
+  .auth-header h1 {
+    font-size: 1.25rem;
+    letter-spacing: 2px;
+  }
+}
+
+/* --- 320px and below (smallest phones) --- */
+@media (max-width: 320px) {
+  .auth-card {
+    padding: 1rem 0.75rem;
+    border-radius: 14px;
+  }
+
+  .auth-header {
+    margin-bottom: 1.75rem;
+  }
+
+  .auth-header h1 {
+    font-size: 1.1rem;
+    letter-spacing: 1px;
+  }
+
+  .input-group input {
+    padding: 0.8rem 0.85rem 0.8rem 2.75rem;
+    font-size: 0.88rem;
+  }
+
+  .auth-button,
+  .github-button {
+    font-size: 0.9rem;
+    min-height: 44px;
+  }
+}
