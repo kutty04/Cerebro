@@ -1,52 +1,37 @@
 import React, { useState, useEffect } from 'react';
-import { Search, BrainCircuit, Terminal, Cpu, Zap, FolderDot, Copy, Check, ExternalLink, Activity, GitBranch } from 'lucide-react';
-import Auth from './Auth';
+import { 
+  Search, 
+  Terminal, 
+  Sparkles, 
+  BookOpen, 
+  ExternalLink, 
+  GitBranch, 
+  CheckCircle, 
+  Activity, 
+  Layers,
+  ArrowRight,
+  BrainCircuit,
+  MessageSquare,
+  ShieldCheck,
+  Zap,
+  FolderDot,
+  Trash2,
+  Cpu,
+  BarChart2,
+  Clock,
+  LogOut
+} from 'lucide-react';
+import { supabase } from '../supabaseClient';
+import { apiFetch } from '../apiClient';
 import NeuralMap from './NeuralMap';
 import './CodeRAG.css';
-
-import ReactMarkdown from 'react-markdown';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { atomDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
-
-const CodeBlockWithCopy = ({ match, children, props }) => {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(String(children).replace(/\n$/, ''));
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <div className="code-block-wrapper">
-      <div className="code-block-header">
-        <span className="code-language">{match[1]}</span>
-        <button onClick={handleCopy} className="copy-button" aria-label="Copy code">
-          {copied ? <Check size={16} /> : <Copy size={16} />}
-        </button>
-      </div>
-      <SyntaxHighlighter
-        style={atomDark}
-        language={match[1]}
-        PreTag="div"
-        customStyle={{ margin: 0, borderTopLeftRadius: 0, borderTopRightRadius: 0 }}
-        {...props}
-      >
-        {String(children).replace(/\n$/, '')}
-      </SyntaxHighlighter>
-    </div>
-  );
-};
-
-import { supabase } from '../supabaseClient';
 
 export default function Cerebro({ user }) {
   const [query, setQuery] = useState('');
   const [repoFilter, setRepoFilter] = useState('');
-  const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [results, setResults] = useState(null);
   const [error, setError] = useState('');
-  
   const [view, setView] = useState('search');
   const [analytics, setAnalytics] = useState(null);
   const [history, setHistory] = useState([]);
@@ -55,9 +40,6 @@ export default function Cerebro({ user }) {
   const [showIngestModal, setShowIngestModal] = useState(false);
   const [ingestUrl, setIngestUrl] = useState('');
   const [ingestStatus, setIngestStatus] = useState({ loading: false, error: '', success: '', logs: [] });
-
-  const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-  const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
 
   const addLog = (msg) => {
     setIngestStatus(prev => ({ ...prev, logs: [...prev.logs, msg] }));
@@ -74,12 +56,10 @@ export default function Cerebro({ user }) {
       setTimeout(() => addLog('📁 Scanning file structure...'), 1800);
       setTimeout(() => addLog('🧠 Generating semantic embeddings...'), 3500);
 
-      const response = await fetch(`${apiUrl}/ingest`, {
+      const response = await apiFetch('/ingest', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          repo_url: ingestUrl, 
-          user_id: user.id 
+          repo_url: ingestUrl,
         }),
       });
 
@@ -93,18 +73,22 @@ export default function Cerebro({ user }) {
       });
       setIngestUrl('');
       setTimeout(() => setShowIngestModal(false), 3000);
+      fetchUserRepos();
     } catch (err) {
-      setIngestStatus({ loading: false, error: err.message, success: '' });
+      setIngestStatus({ 
+        loading: false, 
+        error: err.message || 'Failed to ingest repository.', 
+        success: '', 
+        logs: [] 
+      });
     }
   };
 
   const fetchDashboardData = async () => {
     try {
-      const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
       const [res1, res2] = await Promise.all([
-        fetch(`${apiUrl}/analytics`),
-        fetch(`${apiUrl}/history`)
+        apiFetch('/analytics'),
+        apiFetch('/history')
       ]);
       setAnalytics(await res1.json());
       setHistory(await res2.json());
@@ -119,9 +103,7 @@ export default function Cerebro({ user }) {
   const fetchUserRepos = async () => {
     setRepoLoading(true);
     try {
-      const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
-      const res = await fetch(`${apiUrl}/user-repos?user_id=${user.id}`);
+      const res = await apiFetch('/user-repos');
       const data = await res.json();
       setUserRepos(data.repos || []);
     } catch (err) {
@@ -135,9 +117,7 @@ export default function Cerebro({ user }) {
     if (!confirm(`Are you sure you want to delete ${repoName}? This cannot be undone.`)) return;
     
     try {
-      const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
-      const res = await fetch(`${apiUrl}/delete-repo?repo_name=${repoName}&user_id=${user.id}`, { method: 'POST' });
+      const res = await apiFetch(`/delete-repo?repo_name=${encodeURIComponent(repoName)}`, { method: 'POST' });
       if (res.ok) {
         setUserRepos(prev => prev.filter(r => r !== repoName));
       }
@@ -155,7 +135,6 @@ export default function Cerebro({ user }) {
   }, [view]);
 
   const getSourceInfo = (repo, filepath, dbUrl) => {
-    // If we have a real URL from the database, use it! (SaaS / Production Mode)
     if (dbUrl && dbUrl.startsWith('http')) {
       return {
         link: dbUrl,
@@ -169,7 +148,6 @@ export default function Cerebro({ user }) {
       cleanPath = cleanPath.substring(repo.length + 1);
     }
 
-    // Fallback if no cloud URL is available
     return { 
       link: '#', 
       label: 'Cloud Only',
@@ -177,41 +155,31 @@ export default function Cerebro({ user }) {
     };
   };
 
-  // Simulating neural connection effect
-  useEffect(() => {
-    const scanInterval = setInterval(() => {
-      setIsScanning(prev => !prev);
-    }, 3000);
-    return () => clearInterval(scanInterval);
-  }, []);
-
   const performSearch = async (searchQuery) => {
     if (!searchQuery.trim()) return;
 
     setLoading(true);
     setError('');
-    setResults(null);
+    setIsScanning(true);
 
     try {
-      const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
-      const response = await fetch(`${apiUrl}/search`, {
+      const response = await apiFetch('/search', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           query: searchQuery, 
           top_k: 4,
-          user_id: user.id,
           ...(repoFilter ? { repo_filter: repoFilter } : {}),
           history: chatContext
         }),
       });
 
-      if (!response.ok) throw new Error('Cerebro connection failed');
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Cerebro connection failed');
+      }
       const data = await response.json();
       setResults(data);
       
-      // Update local context for next turn
       setChatContext(prev => [
         ...prev, 
         { role: 'user', content: searchQuery },
@@ -222,6 +190,7 @@ export default function Cerebro({ user }) {
       setError(err.message || 'Neural link disconnected. Check your backend server.');
     } finally {
       setLoading(false);
+      setIsScanning(false);
     }
   };
 
@@ -232,22 +201,28 @@ export default function Cerebro({ user }) {
 
   return (
     <div className="cerebro-container">
-      {/* Background Neural Grid */}
       <div className="neural-grid"></div>
 
       <header className="cerebro-header">
         <div className="user-profile">
           <div className="user-avatar">
-            {user.email[0].toUpperCase()}
+            {user.email ? user.email[0].toUpperCase() : 'U'}
           </div>
           <div className="user-info">
             <span className="user-email">{user.email}</span>
             <div style={{display: 'flex', gap: '0.5rem'}}>
-              <button onClick={() => setShowIngestModal(true)} className="ingest-nav-btn">
-                <GitBranch size={12} /> Import Repo
+              <button 
+                onClick={() => setShowIngestModal(true)}
+                className="ingest-nav-btn"
+              >
+                <GitBranch size={12} /> Connect Repo
               </button>
-              <button onClick={() => supabase.auth.signOut()} className="logout-btn">
-                Disconnect
+              <button 
+                onClick={() => supabase.auth.signOut()} 
+                className="signout-btn"
+                title="Disconnect Neural Link"
+              >
+                <LogOut size={12} /> Disconnect
               </button>
             </div>
           </div>
@@ -319,93 +294,106 @@ export default function Cerebro({ user }) {
           <NeuralMap user={user} />
         )}
 
+        {view === 'dashboard' && (
+          <div className="dashboard-view">
+            {analytics ? (
+              <>
+                <div className="stats-grid">
+                  <div className="stat-card">
+                    <Search className="stat-icon" />
+                    <div className="stat-value">{analytics.total_searches}</div>
+                    <div className="stat-label">Total Queries</div>
+                  </div>
+                  <div className="stat-card">
+                    <Zap className="stat-icon" />
+                    <div className="stat-value">{analytics.avg_latency_ms} <span className="unit">ms</span></div>
+                    <div className="stat-label">Avg Latency</div>
+                  </div>
+                  <div className="stat-card">
+                    <ShieldCheck className="stat-icon" />
+                    <div className="stat-value">{analytics.avg_confidence} <span className="unit">%</span></div>
+                    <div className="stat-label">Avg Confidence</div>
+                  </div>
+                </div>
+
+                <div className="history-section">
+                  <h3><Clock size={18} /> Recent Neural Queries</h3>
+                  <div className="history-list">
+                    {history.map((item) => (
+                      <div key={item.id} className="history-item">
+                        <div className="history-query">{item.query}</div>
+                        <div className="history-meta">
+                          <span className="history-time">{new Date(item.timestamp).toLocaleTimeString()}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="loading-state">
+                <Activity className="spin" /> Loading Telemetry Data...
+              </div>
+            )}
+          </div>
+        )}
+
         {view === 'search' && (
           <>
-            <form onSubmit={handleSearch} className="search-box">
-              <div className="input-wrapper">
+            <form onSubmit={handleSearch} className="search-form">
+              <div className="search-bar">
                 <Search className="search-icon" size={20} />
                 <input
                   type="text"
-                  placeholder="Read the mind of your past projects... (e.g., 'How do I handle GPS in the bus app?')"
+                  placeholder="Ask Cerebro anything about your codebase..."
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   className="search-input"
-                  autoFocus
                 />
-                {loading && <div className="scanning-beam"></div>}
+                <button type="submit" disabled={loading} className="search-button">
+                  {loading ? <Activity className="spin" size={18} /> : <ArrowRight size={18} />}
+                </button>
               </div>
-              <select 
-                value={repoFilter} 
-                onChange={(e) => setRepoFilter(e.target.value)}
-                className="repo-select"
-              >
-                <option value="">All Projects</option>
-                {userRepos.map(repo => (
-                  <option key={repo} value={repo}>{repo}</option>
-                ))}
-              </select>
-              <button type="submit" disabled={loading} className="search-button">
-                {loading ? <Zap className="spin" /> : 'Connect'}
-              </button>
+
+              <div className="filters-bar">
+                <span className="filter-label">Filter Scope:</span>
+                <input
+                  type="text"
+                  placeholder="Repository name (e.g. Cerebro)"
+                  value={repoFilter}
+                  onChange={(e) => setRepoFilter(e.target.value)}
+                  className="repo-filter-input"
+                />
+              </div>
             </form>
 
             {error && (
-              <div className="error-message">
-                <Terminal size={18} />
-                <span>{error}</span>
+              <div className="error-card">
+                <p>{error}</p>
               </div>
             )}
 
             {results && (
               <div className="results-container">
-                <div className="ai-insight-card">
-                  <div className="card-header ai-header" style={{display: 'flex', justifyContent: 'space-between', width: '100%'}}>
-                    <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem'}}>
-                      <Cpu size={20} className="neon-icon" />
-                      <h3>Cerebro Insight</h3>
-                    </div>
-                    {results.confidence > 0 && (
-                      <div className={`confidence-badge ${results.confidence > 80 ? 'high' : results.confidence > 60 ? 'medium' : 'low'}`} title="AI Confidence Score">
-                        <Activity size={14} />
-                        <span>{results.confidence}% Match</span>
-                      </div>
-                    )}
+                <div className="answer-card">
+                  <div className="answer-header">
+                    <Sparkles className="neon-icon" size={20} />
+                    <h2>Synthesized Answer</h2>
+                    <span className="confidence-badge">
+                      {results.confidence}% Confidence
+                    </span>
                   </div>
-                  <div className="ai-answer-wrapper">
-                    <ReactMarkdown
-                      components={{
-                        code({ node, inline, className, children, ...props }) {
-                          const match = /language-(\w+)/.exec(className || '');
-                          return !inline && match ? (
-                            <CodeBlockWithCopy match={match} props={props}>
-                              {children}
-                            </CodeBlockWithCopy>
-                          ) : (
-                            <code className={className} {...props}>
-                              {children}
-                            </code>
-                          );
-                        }
-                      }}
-                    >
-                      {results.answer}
-                    </ReactMarkdown>
+                  <div className="answer-content">
+                    {results.answer}
                   </div>
 
                   {results.follow_ups && results.follow_ups.length > 0 && (
-                    <div className="follow-ups-container">
-                      <p className="follow-ups-title">💡 Suggested Follow-ups:</p>
-                      <div className="follow-ups-list">
-                        {results.follow_ups.map((question, idx) => (
-                          <button 
-                            key={idx} 
-                            className="follow-up-chip"
-                            onClick={() => {
-                              setQuery(question);
-                              performSearch(question);
-                            }}
-                          >
-                            {question}
+                    <div className="follow-ups-section">
+                      <h4>Suggested Probes:</h4>
+                      <div className="follow-up-buttons">
+                        {results.follow_ups.map((q, idx) => (
+                          <button key={idx} onClick={() => { setQuery(q); performSearch(q); }} className="follow-up-btn">
+                            <MessageSquare size={14} /> {q}
                           </button>
                         ))}
                       </div>
@@ -413,91 +401,44 @@ export default function Cerebro({ user }) {
                   )}
                 </div>
 
-                <div className="snippets-grid">
-                  {results.sources.map((source, idx) => (
-                    <div key={idx} className="snippet-card">
-                      <div className="card-header" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-                        <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem'}}>
-                          <FolderDot size={16} className="file-icon" />
-                          <span className="repo-name">{source.repo}</span>
-                          <span className="file-path">/{source.file}</span>
-                        </div>
-                        {(() => {
-                          const sourceInfo = getSourceInfo(source.repo, source.file, source.url);
-                          return (
-                            <a 
-                              href={sourceInfo.link} 
-                              target={sourceInfo.label === 'GitHub' ? "_blank" : "_self"} 
-                              rel={sourceInfo.label === 'GitHub' ? "noopener noreferrer" : ""}
-                              className="github-link"
-                              title={`Open in ${sourceInfo.label}`}
-                            >
-                              {sourceInfo.icon} {sourceInfo.label}
-                            </a>
-                          );
-                        })()}
-                      </div>
-                      <div className="code-container">
-                        <pre>
-                          <code>{source.code}</code>
-                        </pre>
-                      </div>
+                {results.sources && results.sources.length > 0 && (
+                  <div className="sources-section">
+                    <h3><Layers size={18} /> Supporting Code Nodes ({results.sources.length})</h3>
+                    <div className="sources-grid">
+                      {results.sources.map((source, idx) => {
+                        const info = getSourceInfo(source.repo, source.file, source.url);
+                        return (
+                          <div key={idx} className="source-card">
+                            <div className="source-header">
+                              <span className="source-file">{source.file}</span>
+                              {info.link !== '#' ? (
+                                <a href={info.link} target="_blank" rel="noopener noreferrer" className="source-link">
+                                  {info.icon} {info.label}
+                                </a>
+                              ) : (
+                                <span className="source-link disabled">
+                                  {info.icon} {info.label}
+                                </span>
+                              )}
+                            </div>
+                            <pre className="source-code">
+                              <code>{source.code}</code>
+                            </pre>
+                          </div>
+                        );
+                      })}
                     </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {!results && !loading && !error && (
-              <div className="empty-state">
-                <p>"Just as Cerebro finds any mutant on Earth, we will find the exact logic you need."</p>
+                  </div>
+                )}
               </div>
             )}
           </>
         )}
 
-        {view === 'dashboard' && (
-          <div className="dashboard-container">
-            {analytics && (
-              <div className="stats-grid">
-                <div className="stat-card">
-                  <h4>Total Queries</h4>
-                  <p className="stat-value">{analytics.total_searches}</p>
-                </div>
-                <div className="stat-card">
-                  <h4>Avg Latency</h4>
-                  <p className="stat-value">{analytics.avg_latency_ms} ms</p>
-                </div>
-                <div className="stat-card">
-                  <h4>Avg Confidence</h4>
-                  <p className="stat-value">{analytics.avg_confidence}%</p>
-                </div>
-              </div>
-            )}
-            
-            <div className="history-section">
-              <h3>Recent Neural Syncs (Chat History)</h3>
-              <div className="history-list">
-                {history.map((item, idx) => (
-                  <div key={idx} className="history-item">
-                    <div className="history-q">
-                      <Terminal size={14}/> {item.query}
-                    </div>
-                    <div className="history-a">
-                      {item.answer.substring(0, 200)}...
-                    </div>
-            <div className="history-meta">{item.timestamp}</div>
-                  </div>
-                ))}
-                {history.length === 0 && <p className="text-muted">No history found. Run a query first!</p>}
-              </div>
-            </div>
-          </div>
-        )}
-
+        {/* INGESTION MODAL */}
         {showIngestModal && (
-          <div className="modal-overlay">
-            <div className="modal-content ingest-modal">
+          <div className="modal-overlay" onClick={() => setShowIngestModal(false)}>
+            <div className="modal-content ingest-modal" onClick={(e) => e.stopPropagation()}>
               <div className="modal-header">
                 <div style={{display: 'flex', alignItems: 'center', gap: '0.75rem'}}>
                   <GitBranch size={24} className="neon-icon" />

@@ -1,10 +1,22 @@
 import pytest
+import sqlite3
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 import logging
 
 import app
 from app import app as fastapi_app
+
+AUTH_HEADERS = {"Authorization": "Bearer mock-token-user-user-123"}
+
+
+@pytest.fixture(autouse=True)
+def clear_cache():
+    try:
+        with sqlite3.connect("coderag_telemetry.db") as conn:
+            conn.execute("DELETE FROM query_cache")
+    except Exception:
+        pass
 
 
 @pytest.fixture
@@ -24,7 +36,6 @@ def test_health_endpoint(client):
 
 
 def test_readiness_endpoint_degraded(client):
-    # When dependencies are unconfigured/disconnected, expect 503 Service Unavailable
     with patch("app.db", None), patch.dict("os.environ", {}, clear=True):
         response = client.get("/readiness")
         assert response.status_code == 503
@@ -35,7 +46,6 @@ def test_readiness_endpoint_degraded(client):
 
 
 def test_readiness_endpoint_ready(client):
-    # When all dependencies are ready, expect 200 OK
     with patch("app.db", MagicMock()), patch.dict("os.environ", {"HF_TOKEN": "valid_token"}):
         response = client.get("/readiness")
         assert response.status_code == 200
@@ -46,21 +56,21 @@ def test_readiness_endpoint_ready(client):
 
 
 def test_search_validation_empty_query(client):
-    response = client.post("/search", json={"query": ""})
+    response = client.post("/search", json={"query": ""}, headers=AUTH_HEADERS)
     assert response.status_code == 422
 
 
 def test_search_validation_query_too_long(client):
     long_query = "a" * 2001
-    response = client.post("/search", json={"query": long_query})
+    response = client.post("/search", json={"query": long_query}, headers=AUTH_HEADERS)
     assert response.status_code == 422
 
 
 def test_search_validation_invalid_top_k(client):
-    response = client.post("/search", json={"query": "test", "top_k": 0})
+    response = client.post("/search", json={"query": "test", "top_k": 0}, headers=AUTH_HEADERS)
     assert response.status_code == 422
 
-    response = client.post("/search", json={"query": "test", "top_k": 100})
+    response = client.post("/search", json={"query": "test", "top_k": 100}, headers=AUTH_HEADERS)
     assert response.status_code == 422
 
 
@@ -111,7 +121,8 @@ def test_search_user_scoped_rpc(mock_req_post, mock_get_embedding, mock_db, clie
     with patch.dict("os.environ", {"HF_TOKEN": "mock_token"}):
         response = client.post(
             "/search",
-            json={"query": "How do I run main?", "top_k": 5, "user_id": "user-abc"},
+            json={"query": "How do I run main?", "top_k": 5},
+            headers=AUTH_HEADERS,
         )
 
     assert response.status_code == 200
@@ -120,7 +131,7 @@ def test_search_user_scoped_rpc(mock_req_post, mock_get_embedding, mock_db, clie
         {
             "query_embedding": [0.1] * 384,
             "match_count": 5,
-            "p_user_id": "user-abc",
+            "p_user_id": "user-123",
         },
     )
 
@@ -134,7 +145,8 @@ def test_search_user_scoped_rpc_failure_fails_closed(mock_get_embedding, mock_db
     with patch.dict("os.environ", {"HF_TOKEN": "mock_token"}):
         response = client.post(
             "/search",
-            json={"query": "How do I run main?", "top_k": 5, "user_id": "user-abc"},
+            json={"query": "How do I run main in test_fails_closed?", "top_k": 5},
+            headers=AUTH_HEADERS,
         )
 
     assert response.status_code == 500
@@ -146,10 +158,6 @@ def test_search_user_scoped_rpc_failure_fails_closed(mock_get_embedding, mock_db
 @patch("app.db")
 @patch("app.get_embedding")
 def test_search_secret_bearing_exception_sanitization(mock_get_embedding, mock_db, caplog, client):
-    """
-    Regression Test: Proves that secret-bearing exception content (database URL, passwords, tokens)
-    does NOT leak into public API responses or server logs.
-    """
     mock_get_embedding.return_value = [0.1] * 384
 
     fake_secret_password = "SuperSecretPassword123!"
@@ -165,24 +173,22 @@ def test_search_secret_bearing_exception_sanitization(mock_get_embedding, mock_d
     with caplog.at_level(logging.ERROR), patch.dict("os.environ", {"HF_TOKEN": "mock_token"}):
         response = client.post(
             "/search",
-            json={"query": "How do I connect?", "user_id": "user-secret-test"},
+            json={"query": "How do I connect?"},
+            headers=AUTH_HEADERS,
         )
 
     assert response.status_code == 500
     response_text = response.text
     log_text = caplog.text
 
-    # Assert secrets do NOT appear in API response
     assert fake_secret_password not in response_text
     assert fake_db_url not in response_text
     assert fake_token not in response_text
 
-    # Assert secrets do NOT appear in captured server logs
     assert fake_secret_password not in log_text
     assert fake_db_url not in log_text
     assert fake_token not in log_text
 
-    # Assert that sanitized structured log message WAS recorded instead
     assert "User-scoped vector search RPC failed [op=search_user_rpc, exc_type=Exception]" in log_text
 
 
@@ -191,7 +197,7 @@ def test_search_secret_bearing_exception_sanitization(mock_get_embedding, mock_d
 def test_search_upstream_embedding_failure(mock_get_embedding, mock_db, client):
     mock_get_embedding.return_value = None
 
-    response = client.post("/search", json={"query": "test search"})
+    response = client.post("/search", json={"query": "test search"}, headers=AUTH_HEADERS)
     assert response.status_code == 502
     assert "Embedding service unavailable" in response.json()["detail"]
 
@@ -200,7 +206,7 @@ def test_search_upstream_embedding_failure(mock_get_embedding, mock_db, client):
 @patch("app.get_embedding")
 def test_search_db_not_initialized(mock_get_embedding, mock_db, client):
     with patch("app.db", None):
-        response = client.post("/search", json={"query": "test search"})
+        response = client.post("/search", json={"query": "test search"}, headers=AUTH_HEADERS)
         assert response.status_code == 500
         assert "Database client is not initialized" in response.json()["detail"]
 
@@ -221,9 +227,8 @@ def test_index_endpoint_success(mock_get_embedding, mock_db, client):
         "language": "javascript",
         "code_content": "console.log('hello');",
         "source_url": "https://github.com/user/repo",
-        "user_id": "user-123",
     }
-    response = client.post("/index", json=payload)
+    response = client.post("/index", json=payload, headers=AUTH_HEADERS)
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"
@@ -237,7 +242,7 @@ def test_index_endpoint_validation(client):
         "language": "javascript",
         "code_content": "console.log('hello');",
     }
-    response = client.post("/index", json=payload)
+    response = client.post("/index", json=payload, headers=AUTH_HEADERS)
     assert response.status_code == 422
 
 
@@ -245,9 +250,8 @@ def test_index_endpoint_validation(client):
 def test_ingest_endpoint_non_https_validation(mock_db, client):
     payload = {
         "repo_url": "http://github.com/user/repo",
-        "user_id": "user-123",
     }
-    response = client.post("/ingest", json=payload)
+    response = client.post("/ingest", json=payload, headers=AUTH_HEADERS)
     assert response.status_code == 400
     assert "Only HTTPS" in response.json()["detail"]
 
@@ -262,7 +266,7 @@ def test_user_repos_endpoint(mock_db, client):
     )
     mock_db.table.return_value = mock_table
 
-    response = client.get("/user-repos?user_id=user-123")
+    response = client.get("/user-repos", headers=AUTH_HEADERS)
     assert response.status_code == 200
     data = response.json()
     assert data["repos"] == ["repo-a", "repo-b"]
@@ -281,7 +285,7 @@ def test_graph_data_endpoint(mock_db, client):
     )
     mock_db.table.return_value = mock_table
 
-    response = client.get("/graph-data?user_id=user-123")
+    response = client.get("/graph-data", headers=AUTH_HEADERS)
     assert response.status_code == 200
     data = response.json()
     assert "nodes" in data

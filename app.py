@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query, status, Response
+from fastapi import FastAPI, HTTPException, Query, status, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import supabase
@@ -24,6 +24,7 @@ from telemetry import (
     get_chat_history,
     get_cached_query,
     set_cached_query,
+    invalidate_user_repo_cache,
 )
 from ingestion_validator import (
     DEFAULT_LIMITS,
@@ -34,6 +35,7 @@ from ingestion_validator import (
     get_dir_size_bytes,
     run_safe_git_clone,
 )
+from security.auth import AuthenticatedUser, get_current_user, verify_identity_match
 
 load_dotenv(override=True)
 
@@ -102,12 +104,12 @@ class SearchRequest(BaseModel):
     top_k: Optional[int] = Field(default=5, ge=1, le=50, description="Number of results to retrieve")
     repo_filter: Optional[str] = Field(default=None, max_length=200, description="Filter by repository name")
     history: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Recent conversation turns")
-    user_id: Optional[str] = Field(default=None, max_length=200, description="User identifier")
+    user_id: Optional[str] = Field(default=None, max_length=200, description="Deprecated user identifier")
 
 
 class IngestRequest(BaseModel):
     repo_url: str = Field(..., min_length=5, max_length=500, description="Repository URL to ingest")
-    user_id: str = Field(..., min_length=1, max_length=200, description="User identifier")
+    user_id: Optional[str] = Field(default=None, max_length=200, description="Deprecated user identifier")
 
 
 class IndexRequest(BaseModel):
@@ -116,7 +118,7 @@ class IndexRequest(BaseModel):
     language: str = Field(..., min_length=1, max_length=50, description="Source code language")
     code_content: str = Field(..., min_length=1, max_length=500000, description="Code snippet content")
     source_url: Optional[str] = Field(default=None, max_length=500, description="Web source URL")
-    user_id: Optional[str] = Field(default=None, max_length=200, description="User identifier")
+    user_id: Optional[str] = Field(default=None, max_length=200, description="Deprecated user identifier")
 
 
 class SearchResponse(BaseModel):
@@ -173,7 +175,7 @@ def get_embedding(text: str) -> Optional[List[float]]:
         return None
 
 
-# Health check endpoint (Liveness probe)
+# Unprotected Public Endpoints
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     is_hf_ready = os.getenv("HF_TOKEN") is not None
@@ -186,7 +188,6 @@ async def health_check():
     }
 
 
-# Readiness probe endpoint (Orchestration readiness check: HTTP 200 if ready, HTTP 503 if degraded)
 @app.get("/readiness", response_model=ReadinessResponse)
 async def readiness_check(response: Response):
     is_hf_ready = os.getenv("HF_TOKEN") is not None
@@ -210,25 +211,29 @@ async def readiness_check(response: Response):
         }
 
 
-# Search endpoint
+# Protected Endpoint: Search
 @app.post("/search", response_model=SearchResponse)
-async def search(request: SearchRequest):
+async def search(request: SearchRequest, current_user: AuthenticatedUser = Depends(get_current_user)):
     """
     Search codebases using vector similarity + LLM generation.
-    Enforces strict user isolation without silent fallback to unscoped retrieval.
+    Strictly isolated to authenticated current_user.
     """
     if not db:
         raise HTTPException(status_code=500, detail="Database client is not initialized")
 
+    # Enforce identity matching if client sends legacy user_id
+    verify_identity_match(current_user.id, request.user_id)
+    user_id = current_user.id
+
     start_time = time.time()
 
-    # Check SQLite Cache (User-scoped cache lookup)
+    # Check SQLite Cache (User-scoped SHA-256 cache lookup)
     try:
-        cached = get_cached_query(request.query, request.repo_filter, request.user_id)
+        cached = get_cached_query(request.query, request.repo_filter, user_id)
         if cached:
             logger.info("🟢 Cache hit! Returning instant response (0 tokens)")
             latency_ms = (time.time() - start_time) * 1000
-            log_search(request.query, request.repo_filter, cached["confidence"], latency_ms)
+            log_search(request.query, request.repo_filter, cached["confidence"], latency_ms, user_id=user_id)
             return SearchResponse(
                 answer=cached["answer"],
                 sources=cached["sources"],
@@ -249,52 +254,31 @@ async def search(request: SearchRequest):
         if not query_embedding:
             raise HTTPException(status_code=502, detail="Embedding service unavailable")
 
-        # Step 2: Search pgvector (Semantic)
+        # Step 2: Search pgvector (Semantic RPC strictly scoped by verified user_id)
         logger.info("📚 Searching vector database...")
-
         vector_results_data = []
 
-        if request.user_id:
-            # User identity is present: MUST execute user-scoped RPC. FAIL CLOSED if RPC fails.
-            try:
-                search_rpc = db.rpc(
-                    "search_code_snippets",
-                    {
-                        "query_embedding": query_embedding,
-                        "match_count": request.top_k,
-                        "p_user_id": request.user_id,
-                    },
-                )
-                if request.repo_filter:
-                    search_rpc = search_rpc.eq("repo_name", request.repo_filter)
-                res = search_rpc.execute()
-                vector_results_data = res.data or []
-            except Exception as rpc_e:
-                logger.error("User-scoped vector search RPC failed [op=search_user_rpc, exc_type=%s]", type(rpc_e).__name__)
-                # FAIL CLOSED: Do not perform an unscoped retry!
-                raise HTTPException(
-                    status_code=500,
-                    detail="Search service error: user isolation query could not be executed safely.",
-                )
-        else:
-            # Anonymous / global search (no user_id provided)
-            try:
-                search_rpc = db.rpc(
-                    "search_code_snippets",
-                    {
-                        "query_embedding": query_embedding,
-                        "match_count": request.top_k,
-                    },
-                )
-                if request.repo_filter:
-                    search_rpc = search_rpc.eq("repo_name", request.repo_filter)
-                res = search_rpc.execute()
-                vector_results_data = res.data or []
-            except Exception as rpc_e:
-                logger.error("Vector search RPC failed [op=search_anon_rpc, exc_type=%s]", type(rpc_e).__name__)
-                vector_results_data = []
+        try:
+            search_rpc = db.rpc(
+                "search_code_snippets",
+                {
+                    "query_embedding": query_embedding,
+                    "match_count": request.top_k,
+                    "p_user_id": user_id,
+                },
+            )
+            if request.repo_filter:
+                search_rpc = search_rpc.eq("repo_name", request.repo_filter)
+            res = search_rpc.execute()
+            vector_results_data = res.data or []
+        except Exception as rpc_e:
+            logger.error("User-scoped vector search RPC failed [op=search_user_rpc, exc_type=%s]", type(rpc_e).__name__)
+            raise HTTPException(
+                status_code=500,
+                detail="Search service error: user isolation query could not be executed safely.",
+            )
 
-        # Step 2.5: Keyword Search (Exact Match Fallback - strictly user-scoped when user_id is present)
+        # Step 2.5: Keyword Search (Exact Match Fallback - strictly user-scoped)
         stop_words = {
             "how", "do", "did", "i", "we", "you", "what", "is", "where", "can",
             "find", "the", "a", "an", "to", "for", "in", "of", "and", "or", "my",
@@ -314,9 +298,8 @@ async def search(request: SearchRequest):
                 try:
                     kw_search = db.table("code_snippets").select(
                         "id, repo_name, file_path, language, code_content, source_url"
-                    )
-                    if request.user_id:
-                        kw_search = kw_search.eq("user_id", request.user_id)
+                    ).eq("user_id", user_id)
+
                     if request.repo_filter:
                         kw_search = kw_search.eq("repo_name", request.repo_filter)
 
@@ -468,12 +451,12 @@ FOLLOW_UPS:
                 if line.startswith("-"):
                     follow_ups.append(line.lstrip("- ").strip())
 
-        # Log analytics and save history
+        # Log analytics and save history strictly for current_user
         latency_ms = (time.time() - start_time) * 1000
         try:
-            log_search(request.query, request.repo_filter, confidence, latency_ms)
-            save_chat(request.user_id or "default_thread", request.query, answer_text, sources)
-            set_cached_query(request.query, request.repo_filter, answer_text, sources, confidence, request.user_id)
+            log_search(request.query, request.repo_filter, confidence, latency_ms, user_id=user_id)
+            save_chat(user_id, request.query, answer_text, sources, user_id=user_id)
+            set_cached_query(request.query, request.repo_filter, answer_text, sources, confidence, user_id=user_id)
         except Exception as log_e:
             logger.warning("Logging failed [op=post_search_logging, exc_type=%s]", type(log_e).__name__)
 
@@ -494,44 +477,44 @@ FOLLOW_UPS:
         )
 
 
+# Protected Endpoint: Analytics
 @app.get("/analytics")
-async def fetch_analytics():
+async def fetch_analytics(current_user: AuthenticatedUser = Depends(get_current_user)):
     try:
-        return get_analytics()
+        return get_analytics(user_id=current_user.id)
     except Exception as e:
         logger.error("Analytics fetch failed [op=fetch_analytics, exc_type=%s]", type(e).__name__)
         return {"total_searches": 0, "avg_latency_ms": 0.0, "avg_confidence": 0.0, "recent_queries": []}
 
 
+# Protected Endpoint: History
 @app.get("/history")
-async def fetch_history():
+async def fetch_history(current_user: AuthenticatedUser = Depends(get_current_user)):
     try:
-        return get_chat_history()
+        return get_chat_history(user_id=current_user.id)
     except Exception as e:
         logger.error("History fetch failed [op=fetch_history, exc_type=%s]", type(e).__name__)
         return []
 
 
-# Safe Indexing Endpoint (uses serverless embedding)
+# Protected Endpoint: Index Snippet
 @app.post("/index")
-async def index_snippet(request: IndexRequest):
-    """
-    Add a code snippet to the index using serverless embeddings.
-    """
+async def index_snippet(request: IndexRequest, current_user: AuthenticatedUser = Depends(get_current_user)):
     if not db:
         raise HTTPException(status_code=500, detail="Database client not initialized")
+
+    verify_identity_match(current_user.id, request.user_id)
+    user_id = current_user.id
 
     try:
         logger.info(f"📝 Indexing snippet for {request.repo_name}/{request.file_path}")
 
-        # Generate embedding via serverless helper
         embedding = get_embedding(request.code_content)
         if not embedding:
             raise HTTPException(
                 status_code=502, detail="Failed to generate embedding from serverless provider"
             )
 
-        # Store in Supabase
         data = {
             "repo_name": request.repo_name,
             "file_path": request.file_path,
@@ -539,7 +522,7 @@ async def index_snippet(request: IndexRequest):
             "code_content": request.code_content,
             "embedding": embedding,
             "source_url": request.source_url,
-            "user_id": request.user_id,
+            "user_id": user_id,
         }
 
         result = db.table("code_snippets").insert(data).execute()
@@ -547,6 +530,7 @@ async def index_snippet(request: IndexRequest):
         if not result.data:
             raise HTTPException(status_code=500, detail="Database insertion failed")
 
+        invalidate_user_repo_cache(user_id, request.repo_name)
         logger.info(f"✅ Successfully indexed {request.file_path}")
         return {"status": "success", "snippet_id": result.data[0].get("id")}
 
@@ -557,39 +541,33 @@ async def index_snippet(request: IndexRequest):
         raise HTTPException(status_code=500, detail="Indexing failed due to an internal error.")
 
 
+# Protected Endpoint: Ingest Repository
 @app.post("/ingest")
-async def ingest_repo(request: IngestRequest):
-    """
-    Harden repository ingestion against SSRF, unsafe protocols, resource exhaustion, and path traversal.
-    Clones GitHub repository using strict shallow HTTPS clone, indexes snippets, and cleans up.
-    """
+async def ingest_repo(request: IngestRequest, current_user: AuthenticatedUser = Depends(get_current_user)):
     if not db:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database client is not initialized.")
 
-    # Step 1: URL validation & canonical normalization
+    verify_identity_match(current_user.id, request.user_id)
+    user_id = current_user.id
+
     canonical_url = validate_and_normalize_github_url(request.repo_url)
+    rate_limiter.check_and_record(user_id)
 
-    # Step 2: Rate limit check (user_id & global rate window)
-    rate_limiter.check_and_record(request.user_id)
-
-    # Step 3: DNS resolution & SSRF IP safety check
     if not validate_dns_ip_safety("github.com"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Repository network destination is unreachable or restricted.",
         )
 
-    # Step 4: Concurrency check & lock acquisition
-    concurrency_manager.acquire(request.user_id, canonical_url)
+    concurrency_manager.acquire(user_id, canonical_url)
 
     temp_dir = tempfile.mkdtemp(prefix="cerebro_ingest_")
     inserted_snippet_ids: List[int] = []
     repo_name = canonical_url.split("/")[-1]
 
     try:
-        logger.info(f"🚀 Ingesting repo: {canonical_url} for user: {request.user_id}")
+        logger.info(f"🚀 Ingesting repo: {canonical_url} for user: {user_id}")
 
-        # Step 5: Safe process-tree subprocess git clone (depth 1, single branch, no tags, submodules disabled, redirects blocked)
         try:
             returncode = run_safe_git_clone(canonical_url, temp_dir, DEFAULT_LIMITS.MAX_REPO_CLONE_TIMEOUT_SEC)
             if returncode != 0:
@@ -605,7 +583,6 @@ async def ingest_repo(request: IngestRequest):
                 detail="Repository clone timed out.",
             )
 
-        # Step 6: Post-clone disk size check (including .git objects & hidden files)
         try:
             total_disk_bytes = get_dir_size_bytes(temp_dir)
             if total_disk_bytes > DEFAULT_LIMITS.MAX_REPO_DISK_SIZE_BYTES:
@@ -622,10 +599,9 @@ async def ingest_repo(request: IngestRequest):
                 detail="Failed to inspect repository filesystem.",
             )
 
-        # Step 7: Initialize Indexer and scan files
         indexer = CodeIndexer(repos_path=temp_dir, repo_url=canonical_url, repo_name=repo_name, limits=DEFAULT_LIMITS)
         indexer.db = db
-        indexer.user_id = request.user_id
+        indexer.user_id = user_id
 
         snippets = indexer.scan_repos()
         if not snippets:
@@ -635,8 +611,8 @@ async def ingest_repo(request: IngestRequest):
                 "indexed_count": 0,
             }
 
-        # Step 8: Index snippets & record inserted IDs
         inserted_snippet_ids = indexer.index_snippets(snippets)
+        invalidate_user_repo_cache(user_id, repo_name)
 
         return {
             "status": "success",
@@ -645,7 +621,6 @@ async def ingest_repo(request: IngestRequest):
         }
 
     except HTTPException:
-        # Rollback database inserts on HTTP exception failure (strictly targeting created IDs)
         if inserted_snippet_ids and db:
             try:
                 db.table("code_snippets").delete().in_("id", inserted_snippet_ids).execute()
@@ -665,8 +640,7 @@ async def ingest_repo(request: IngestRequest):
             detail="Ingestion failed due to an internal error.",
         )
     finally:
-        # Step 9: Always release concurrency lock & clean temporary directory
-        concurrency_manager.release(request.user_id, canonical_url)
+        concurrency_manager.release(user_id, canonical_url)
 
         def onerror(func, path, exc_info):
             import stat
@@ -683,16 +657,20 @@ async def ingest_repo(request: IngestRequest):
             logger.warning("Cleanup failed [op=ingest_cleanup, exc_type=%s]", type(cleanup_e).__name__)
 
 
+# Protected Endpoint: User Repositories
 @app.get("/user-repos")
-async def get_user_repos(user_id: str = Query(..., min_length=1, max_length=200)):
-    """
-    Fetch unique repository names indexed for this user.
-    """
+async def get_user_repos(
+    user_id: Optional[str] = Query(None, min_length=1, max_length=200),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
     if not db:
         raise HTTPException(status_code=500, detail="Database not connected")
 
+    verify_identity_match(current_user.id, user_id)
+    target_user_id = current_user.id
+
     try:
-        result = db.table("code_snippets").select("repo_name").eq("user_id", user_id).execute()
+        result = db.table("code_snippets").select("repo_name").eq("user_id", target_user_id).execute()
         repos = sorted(list(set([r["repo_name"] for r in (result.data or []) if "repo_name" in r])))
         return {"repos": repos}
     except Exception as e:
@@ -700,35 +678,42 @@ async def get_user_repos(user_id: str = Query(..., min_length=1, max_length=200)
         raise HTTPException(status_code=500, detail="Failed to fetch repositories.")
 
 
+# Protected Endpoint: Delete Repository
 @app.post("/delete-repo")
 async def delete_repo(
     repo_name: str = Query(..., min_length=1, max_length=200),
-    user_id: str = Query(..., min_length=1, max_length=200),
+    user_id: Optional[str] = Query(None, min_length=1, max_length=200),
+    current_user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """
-    Delete all snippets associated with a repository for a user.
-    """
     if not db:
         raise HTTPException(status_code=500, detail="Database not connected")
 
+    verify_identity_match(current_user.id, user_id)
+    target_user_id = current_user.id
+
     try:
-        db.table("code_snippets").delete().eq("repo_name", repo_name).eq("user_id", user_id).execute()
+        db.table("code_snippets").delete().eq("repo_name", repo_name).eq("user_id", target_user_id).execute()
+        invalidate_user_repo_cache(target_user_id, repo_name)
         return {"status": "success", "message": f"Repository {repo_name} deleted"}
     except Exception as e:
         logger.error("Failed to delete repo [op=delete_repo, exc_type=%s]", type(e).__name__)
         raise HTTPException(status_code=500, detail="Failed to delete repository.")
 
 
+# Protected Endpoint: Graph Data
 @app.get("/graph-data")
-async def get_graph_data(user_id: str = Query(..., min_length=1, max_length=200)):
-    """
-    Generate graph nodes and links for the user's codebase.
-    """
+async def get_graph_data(
+    user_id: Optional[str] = Query(None, min_length=1, max_length=200),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
     if not db:
         raise HTTPException(status_code=500, detail="Database not connected")
 
+    verify_identity_match(current_user.id, user_id)
+    target_user_id = current_user.id
+
     try:
-        result = db.table("code_snippets").select("repo_name, file_path").eq("user_id", user_id).execute()
+        result = db.table("code_snippets").select("repo_name, file_path").eq("user_id", target_user_id).execute()
 
         nodes = []
         links = []
@@ -760,7 +745,7 @@ async def get_graph_data(user_id: str = Query(..., min_length=1, max_length=200)
         raise HTTPException(status_code=500, detail="Failed to generate graph visualization.")
 
 
-# Root endpoint
+# Root endpoint (Public)
 @app.get("/")
 async def root():
     return {
@@ -769,9 +754,9 @@ async def root():
         "endpoints": {
             "health": "/health",
             "readiness": "/readiness",
-            "search": "/search (POST)",
-            "index": "/index (POST)",
-            "ingest": "/ingest (POST)",
+            "search": "/search (POST - Auth Required)",
+            "index": "/index (POST - Auth Required)",
+            "ingest": "/ingest (POST - Auth Required)",
         },
     }
 

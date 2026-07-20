@@ -25,6 +25,8 @@ from ingestion_validator import (
 )
 import indexer
 
+AUTH_HEADERS = {"Authorization": "Bearer mock-token-user-user-123"}
+
 
 @pytest.fixture
 def client():
@@ -252,7 +254,6 @@ def test_rate_limiter_map_size_eviction():
     rl.check_and_record("u3")
     rl.check_and_record("u4")
 
-    # Map size must be bounded by MAX_RATE_LIMITER_MAP_SIZE (3)
     assert len(rl.user_records) <= 3
 
 
@@ -286,10 +287,9 @@ def test_ingest_success_mocked(
 
     payload = {
         "repo_url": "https://github.com/kutty04/Cerebro.git",
-        "user_id": "user-test-success-123",
     }
     with patch.dict("os.environ", {"HF_TOKEN": "mock_token", "SUPABASE_URL": "https://mock.url", "SUPABASE_KEY": "mock_key"}):
-        response = client.post("/ingest", json=payload)
+        response = client.post("/ingest", json=payload, headers=AUTH_HEADERS)
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"
@@ -305,9 +305,8 @@ def test_ingest_clone_timeout(mock_run_clone, mock_dns_safety, mock_db, client):
 
     payload = {
         "repo_url": "https://github.com/kutty04/Cerebro",
-        "user_id": "user-test-timeout-123",
     }
-    response = client.post("/ingest", json=payload)
+    response = client.post("/ingest", json=payload, headers=AUTH_HEADERS)
     assert response.status_code == 504
     assert "timed out" in response.json()["detail"]
 
@@ -337,10 +336,9 @@ def test_ingest_database_failure_rolls_back(
 
     payload = {
         "repo_url": "https://github.com/kutty04/Cerebro",
-        "user_id": "user-test-rollback",
     }
     with patch.dict("os.environ", {"HF_TOKEN": "mock_token", "SUPABASE_URL": "https://mock.url", "SUPABASE_KEY": "mock_key"}):
-        response = client.post("/ingest", json=payload)
+        response = client.post("/ingest", json=payload, headers=AUTH_HEADERS)
     assert response.status_code == 500
     assert "Failed to index" in response.json()["detail"]
 
@@ -351,10 +349,6 @@ def test_ingest_database_failure_rolls_back(
 
 @patch("app.db")
 def test_rollback_does_not_delete_valid_repo_snippets(mock_db, client):
-    """
-    Verifies that failure rollback deletes ONLY created snippet IDs for this job,
-    never executing a generic delete by repo_name.
-    """
     mock_table = MagicMock()
     mock_db.table.return_value = mock_table
 
@@ -401,9 +395,6 @@ def test_indexer_binary_file_skipped():
 
 
 def test_indexer_symlink_escape_skipped_deterministic():
-    """
-    Proves symlink containment skipping deterministically without relying on OS admin privileges.
-    """
     temp_dir = tempfile.mkdtemp()
     try:
         linked_file = os.path.join(temp_dir, "linked.py")
