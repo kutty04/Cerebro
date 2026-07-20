@@ -7,6 +7,7 @@ import logging
 
 from app import app as fastapi_app
 from security.auth import AuthenticatedUser, get_current_user
+from db_adapter import DatabaseAdapter
 
 AUTH_HEADERS = {"Authorization": "Bearer test-user-user-123"}
 
@@ -276,14 +277,13 @@ def test_ingest_endpoint_non_https_validation(mock_db, client):
 
 
 @patch("app.db")
-def test_user_repos_endpoint(mock_db, client):
-    mock_table = MagicMock()
-    mock_table.select.return_value = mock_table
-    mock_table.eq.return_value = mock_table
-    mock_table.execute.return_value = MagicMock(
-        data=[{"repo_name": "repo-a"}, {"repo_name": "repo-b"}, {"repo_name": "repo-a"}]
-    )
-    mock_db.table.return_value = mock_table
+@patch.object(DatabaseAdapter, "list_owned_repos")
+def test_user_repos_endpoint(mock_list_repos, mock_db, client):
+    mock_list_repos.return_value = [
+        {"repository_name": "repo-a", "id": "repo-a-id"},
+        {"repository_name": "repo-b", "id": "repo-b-id"},
+        {"repository_name": "repo-a", "id": "repo-a-id"},
+    ]
 
     response = client.get("/user-repos", headers=AUTH_HEADERS)
     assert response.status_code == 200

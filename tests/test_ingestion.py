@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from app import app as fastapi_app
 from security.auth import AuthenticatedUser, get_current_user
+from db_adapter import DatabaseAdapter
 from ingestion_validator import (
     DEFAULT_LIMITS,
     IngestionLimits,
@@ -284,12 +285,24 @@ def test_rate_limiter_map_size_eviction():
 @patch("app.validate_dns_ip_safety")
 @patch("app.run_safe_git_clone")
 @patch.object(indexer.CodeIndexer, "get_serverless_embedding")
+@patch.object(DatabaseAdapter, "resolve_user_repo")
+@patch.object(DatabaseAdapter, "create_ingestion_job")
+@patch.object(DatabaseAdapter, "update_job_status")
+@patch.object(DatabaseAdapter, "promote_index_version")
 def test_ingest_success_mocked(
+    mock_promote, mock_update, mock_create, mock_resolve,
     mock_get_embedding, mock_run_clone, mock_dns_safety, mock_db, client
 ):
     mock_dns_safety.return_value = True
     mock_get_embedding.return_value = [0.1] * 384
     mock_run_clone.return_value = 0
+
+    mock_resolve.return_value = {
+        "id": "repo-123",
+        "repository_name": "Cerebro",
+        "active_index_version": "v1",
+    }
+    mock_create.return_value = "job-123"
 
     mock_table = MagicMock()
     mock_table.insert.return_value = mock_table
@@ -318,8 +331,21 @@ def test_ingest_success_mocked(
 @patch("app.db")
 @patch("app.validate_dns_ip_safety")
 @patch("app.run_safe_git_clone")
-def test_ingest_clone_timeout(mock_run_clone, mock_dns_safety, mock_db, client):
+@patch.object(DatabaseAdapter, "resolve_user_repo")
+@patch.object(DatabaseAdapter, "create_ingestion_job")
+@patch.object(DatabaseAdapter, "update_job_status")
+@patch.object(DatabaseAdapter, "fail_and_cleanup_job")
+def test_ingest_clone_timeout(
+    mock_fail, mock_update, mock_create, mock_resolve,
+    mock_run_clone, mock_dns_safety, mock_db, client
+):
     mock_dns_safety.return_value = True
+    mock_resolve.return_value = {
+        "id": "repo-123",
+        "repository_name": "Cerebro",
+        "active_index_version": "v1",
+    }
+    mock_create.return_value = "job-123"
     mock_run_clone.side_effect = subprocess.TimeoutExpired(cmd="git clone", timeout=60)
 
     payload = {
@@ -334,12 +360,24 @@ def test_ingest_clone_timeout(mock_run_clone, mock_dns_safety, mock_db, client):
 @patch("app.validate_dns_ip_safety")
 @patch("app.run_safe_git_clone")
 @patch.object(indexer.CodeIndexer, "get_serverless_embedding")
+@patch.object(DatabaseAdapter, "resolve_user_repo")
+@patch.object(DatabaseAdapter, "create_ingestion_job")
+@patch.object(DatabaseAdapter, "update_job_status")
+@patch.object(DatabaseAdapter, "fail_and_cleanup_job")
 def test_ingest_database_failure_rolls_back(
+    mock_fail, mock_update, mock_create, mock_resolve,
     mock_get_embedding, mock_run_clone, mock_dns_safety, mock_db, client
 ):
     mock_dns_safety.return_value = True
     mock_get_embedding.return_value = [0.1] * 384
     mock_run_clone.return_value = 0
+
+    mock_resolve.return_value = {
+        "id": "repo-123",
+        "repository_name": "Cerebro",
+        "active_index_version": "v1",
+    }
+    mock_create.return_value = "job-123"
 
     def fake_clone(canonical_url, temp_dir, timeout_sec):
         test_file = os.path.join(temp_dir, "main.py")

@@ -59,8 +59,15 @@ async def lifespan(app_instance: FastAPI):
 
     try:
         url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_KEY")
-        if url and key:
+        service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        legacy_key = os.getenv("SUPABASE_KEY")
+
+        key = service_role_key or legacy_key
+
+        if service_role_key and legacy_key and service_role_key.strip() != legacy_key.strip():
+            logger.error("Database configuration mismatch: SUPABASE_SERVICE_ROLE_KEY and legacy SUPABASE_KEY disagree.")
+            db = None
+        elif url and key:
             db = supabase.create_client(url, key)
             logger.info("✅ Supabase client initialized")
         else:
@@ -88,6 +95,8 @@ app.add_middleware(
 )
 
 
+from db_adapter import DatabaseAdapter
+
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000, description="Natural language code search query")
     top_k: Optional[int] = Field(default=5, ge=1, le=50, description="Number of results to retrieve")
@@ -95,11 +104,13 @@ class SearchRequest(BaseModel):
     conversation_id: Optional[str] = Field(default=None, max_length=100, description="Server-assigned conversation UUID")
     history: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Recent conversation turns")
     user_id: Optional[str] = Field(default=None, max_length=200, description="Deprecated user identifier")
+    repository_id: Optional[str] = Field(default=None, max_length=100, description="Optional target repository UUID")
 
 
 class IngestRequest(BaseModel):
     repo_url: str = Field(..., min_length=5, max_length=500, description="Repository URL to ingest")
     user_id: Optional[str] = Field(default=None, max_length=200, description="Deprecated user identifier")
+    repository_id: Optional[str] = Field(default=None, max_length=100, description="Optional target repository UUID")
 
 
 class IndexRequest(BaseModel):
@@ -109,6 +120,11 @@ class IndexRequest(BaseModel):
     code_content: str = Field(..., min_length=1, max_length=500000, description="Code snippet content")
     source_url: Optional[str] = Field(default=None, max_length=500, description="Web source URL")
     user_id: Optional[str] = Field(default=None, max_length=200, description="Deprecated user identifier")
+    repository_id: Optional[str] = Field(default=None, max_length=100, description="Optional target repository UUID")
+    ingestion_job_id: Optional[str] = Field(default=None, max_length=100, description="Optional ingestion job UUID")
+    index_version: Optional[str] = Field(default="v1", max_length=50, description="Optional index version string")
+    commit_sha: Optional[str] = Field(default=None, max_length=100, description="Optional target commit SHA")
+
 
 
 class SearchResponse(BaseModel):
@@ -259,17 +275,36 @@ async def search(search_req: SearchRequest, current_user: AuthenticatedUser = De
         logger.info("📚 Searching vector database...")
         vector_results_data = []
 
+        repo_id = None
+        active_version = None
+
+        if search_req.repository_id:
+            repo = DatabaseAdapter.get_owned_repo(db, user_id, search_req.repository_id)
+            repo_id = repo["id"]
+            active_version = repo.get("active_index_version", "v1")
+        elif search_req.repo_filter and search_req.repo_filter != "ALL":
+            try:
+                repo = DatabaseAdapter.get_repo_by_name(db, user_id, search_req.repo_filter)
+                repo_id = repo["id"]
+                active_version = repo.get("active_index_version", "v1")
+            except HTTPException as he:
+                if he.status_code == status.HTTP_409_CONFLICT:
+                    raise
+                repo_id = None
+                active_version = None
+
         try:
-            search_rpc = db.rpc(
-                "search_code_snippets",
-                {
-                    "query_embedding": query_embedding,
-                    "match_count": top_k,
-                    "p_user_id": user_id,
-                },
-            )
-            if search_req.repo_filter:
-                search_rpc = search_rpc.eq("repo_name", search_req.repo_filter)
+            rpc_params = {
+                "query_embedding": query_embedding,
+                "match_count": top_k,
+                "p_user_id": user_id,
+            }
+            if repo_id:
+                rpc_params["p_repository_id"] = repo_id
+            if active_version:
+                rpc_params["p_index_version"] = active_version
+
+            search_rpc = db.rpc("search_code_snippets", rpc_params)
             res = search_rpc.execute()
             vector_results_data = res.data or []
         except Exception as rpc_e:
@@ -300,7 +335,11 @@ async def search(search_req: SearchRequest, current_user: AuthenticatedUser = De
                         "id, repo_name, file_path, language, code_content, source_url"
                     ).eq("user_id", user_id)
 
-                    if search_req.repo_filter:
+                    if repo_id:
+                        kw_search = kw_search.eq("repository_id", repo_id)
+                        if active_version:
+                            kw_search = kw_search.eq("index_version", active_version)
+                    elif search_req.repo_filter and search_req.repo_filter != "ALL":
                         kw_search = kw_search.eq("repo_name", search_req.repo_filter)
 
                     kw_search = kw_search.ilike("code_content", f"%{kw}%")
@@ -513,6 +552,13 @@ async def index_snippet(index_req: IndexRequest, current_user: AuthenticatedUser
     try:
         logger.info(f"📝 Indexing snippet for {index_req.repo_name}/{index_req.file_path}")
 
+        if index_req.repository_id:
+            repo = DatabaseAdapter.get_owned_repo(db, user_id, index_req.repository_id)
+            repo_id = repo["id"]
+        else:
+            repo = DatabaseAdapter.resolve_user_repo(db, user_id, f"https://github.com/unknown/{index_req.repo_name}")
+            repo_id = repo["id"]
+
         embedding = get_embedding(index_req.code_content)
         if not embedding:
             raise HTTPException(
@@ -527,6 +573,10 @@ async def index_snippet(index_req: IndexRequest, current_user: AuthenticatedUser
             "embedding": embedding,
             "source_url": index_req.source_url,
             "user_id": user_id,
+            "repository_id": repo_id,
+            "ingestion_job_id": index_req.ingestion_job_id,
+            "index_version": index_req.index_version or "v1",
+            "commit_sha": index_req.commit_sha,
         }
 
         result = db.table("code_snippets").insert(data).execute()
@@ -564,9 +614,19 @@ async def ingest_repo(ingest_req: IngestRequest, current_user: AuthenticatedUser
 
     concurrency_manager.acquire(user_id, canonical_url)
 
+    # 1. Resolve repository record
+    repo = DatabaseAdapter.resolve_user_repo(db, user_id, canonical_url)
+    repo_id = repo["id"]
+    repo_name = repo["repository_name"]
+
+    curr_ver = repo.get("active_index_version", "v1")
+    new_ver = "v2" if curr_ver == "v1" else "v1"
+
+    # 2. Create ingestion job
+    job_id = DatabaseAdapter.create_ingestion_job(db, user_id, repo_id, index_version=new_ver)
+    DatabaseAdapter.update_job_status(db, user_id, job_id, "cloning")
+
     temp_dir = tempfile.mkdtemp(prefix="cerebro_ingest_")
-    inserted_snippet_ids: List[int] = []
-    repo_name = canonical_url.split("/")[-1]
 
     try:
         logger.info(f"🚀 Ingesting repo: {canonical_url} for user: {user_id}")
@@ -602,12 +662,24 @@ async def ingest_repo(ingest_req: IngestRequest, current_user: AuthenticatedUser
                 detail="Failed to inspect repository filesystem.",
             )
 
-        indexer = CodeIndexer(repos_path=temp_dir, repo_url=canonical_url, repo_name=repo_name, limits=DEFAULT_LIMITS)
+        DatabaseAdapter.update_job_status(db, user_id, job_id, "indexing")
+
+        indexer = CodeIndexer(
+            repos_path=temp_dir,
+            repo_url=canonical_url,
+            repo_name=repo_name,
+            limits=DEFAULT_LIMITS,
+            repository_id=repo_id,
+            ingestion_job_id=job_id,
+            index_version=new_ver,
+        )
         indexer.db = db
         indexer.user_id = user_id
 
         snippets = indexer.scan_repos()
         if not snippets:
+            DatabaseAdapter.update_job_status(db, user_id, job_id, "completed", inserted_chunk_count=0)
+            DatabaseAdapter.promote_index_version(db, user_id, repo_id, job_id, new_version=new_ver)
             return {
                 "status": "success",
                 "message": "No indexable code found in repository",
@@ -615,6 +687,9 @@ async def ingest_repo(ingest_req: IngestRequest, current_user: AuthenticatedUser
             }
 
         inserted_snippet_ids = indexer.index_snippets(snippets)
+        
+        # 3. Promote index version
+        DatabaseAdapter.promote_index_version(db, user_id, repo_id, job_id, new_version=new_ver)
         invalidate_user_repo_cache(user_id, repo_name)
 
         return {
@@ -623,21 +698,12 @@ async def ingest_repo(ingest_req: IngestRequest, current_user: AuthenticatedUser
             "indexed_count": len(inserted_snippet_ids),
         }
 
-    except HTTPException:
-        if inserted_snippet_ids and db:
-            try:
-                db.table("code_snippets").delete().in_("id", inserted_snippet_ids).execute()
-                logger.info("Rolled back partially inserted snippet records [op=ingest_rollback, count=%d]", len(inserted_snippet_ids))
-            except Exception as rb_e:
-                logger.error("Database rollback failed [op=ingest_rollback, exc_type=%s]", type(rb_e).__name__)
+    except HTTPException as he:
+        DatabaseAdapter.fail_and_cleanup_job(db, user_id, repo_id, job_id, failure_category="HTTP_" + str(he.status_code))
         raise
     except Exception as e:
         logger.error("Ingestion failed unexpectedly [op=ingest_repo, exc_type=%s]", type(e).__name__)
-        if inserted_snippet_ids and db:
-            try:
-                db.table("code_snippets").delete().in_("id", inserted_snippet_ids).execute()
-            except Exception:
-                pass
+        DatabaseAdapter.fail_and_cleanup_job(db, user_id, repo_id, job_id, failure_category=type(e).__name__)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Ingestion failed due to an internal error.",
@@ -672,9 +738,9 @@ async def get_user_repos(
     target_user_id = current_user.id
 
     try:
-        result = db.table("code_snippets").select("repo_name").eq("user_id", target_user_id).execute()
-        repos = sorted(list(set([r["repo_name"] for r in (result.data or []) if "repo_name" in r])))
-        return {"repos": repos}
+        repos = DatabaseAdapter.list_owned_repos(db, target_user_id)
+        repo_names = sorted(list(set([r["repository_name"] for r in repos])))
+        return {"repos": repo_names, "repositories": repos}
     except Exception as e:
         logger.error("Failed to fetch user repos [op=get_user_repos, exc_type=%s]", type(e).__name__)
         raise HTTPException(status_code=500, detail="Failed to fetch repositories.")
@@ -693,7 +759,8 @@ async def delete_repo(
     target_user_id = current_user.id
 
     try:
-        db.table("code_snippets").delete().eq("repo_name", repo_name).eq("user_id", target_user_id).execute()
+        repo = DatabaseAdapter.get_repo_by_name(db, target_user_id, repo_name)
+        DatabaseAdapter.delete_owned_repo(db, target_user_id, repo["id"])
         invalidate_user_repo_cache(target_user_id, repo_name)
         return {"status": "success", "message": f"Repository {repo_name} deleted"}
     except Exception as e:

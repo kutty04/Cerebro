@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app import app as fastapi_app
 from security.auth import AuthenticatedUser, get_current_user, verify_identity_match
+from db_adapter import DatabaseAdapter
 import telemetry
 
 
@@ -323,4 +324,143 @@ def test_malicious_cross_user_id_rejected(mock_db, client):
     res = client.post("/index", json=payload, headers=USER_A_HEADERS)
     assert res.status_code == 403
     assert "user identity mismatch" in res.json()["detail"]
+
+
+# ----------------------------------------------------------------------
+# 8. DATABASE ADAPTER TESTS (PHASE 5A SPECIFICATIONS)
+# ----------------------------------------------------------------------
+
+def test_url_normalization_in_adapter():
+    """Verifies that resolve_user_repo normalizes URL correctly."""
+    mock_db = MagicMock()
+    mock_table = MagicMock()
+    mock_table.select.return_value = mock_table
+    mock_table.eq.return_value = mock_table
+    mock_table.execute.return_value = MagicMock(data=[{"id": "repo-123", "repository_name": "Cerebro"}])
+    mock_db.table.return_value = mock_table
+
+    repo = DatabaseAdapter.resolve_user_repo(mock_db, "user-123", "https://github.com/kutty04/Cerebro.git")
+    assert repo["id"] == "repo-123"
+    # Ensure correct table lookup queries
+    mock_db.table.assert_called_with("user_repositories")
+
+
+def test_repo_name_ambiguity_returns_409():
+    """Verifies that multiple repositories with same name but different owner triggers conflict."""
+    mock_db = MagicMock()
+    mock_table = MagicMock()
+    mock_table.select.return_value = mock_table
+    mock_table.eq.return_value = mock_table
+    # Return 2 records with different IDs (e.g. from owner A and owner B)
+    mock_table.execute.return_value = MagicMock(data=[
+        {"id": "repo-a", "repository_name": "myrepo"},
+        {"id": "repo-b", "repository_name": "myrepo"}
+    ])
+    mock_db.table.return_value = mock_table
+
+    with pytest.raises(HTTPException) as exc_info:
+        DatabaseAdapter.get_repo_by_name(mock_db, "user-123", "myrepo")
+    assert exc_info.value.status_code == 409
+    assert "Multiple repositories found" in exc_info.value.detail
+
+
+def test_duplicate_active_job_conflict():
+    """Verifies that creating job fails if job is already active."""
+    mock_db = MagicMock()
+    mock_table = MagicMock()
+    mock_table.select.return_value = mock_table
+    mock_table.eq.return_value = mock_table
+    mock_table.in_.return_value = mock_table
+    mock_table.execute.return_value = MagicMock(data=[{"id": "active-job"}])
+    mock_db.table.return_value = mock_table
+
+    with pytest.raises(HTTPException) as exc_info:
+        DatabaseAdapter.create_ingestion_job(mock_db, "user-123", "repo-123")
+    assert exc_info.value.status_code == 409
+    assert "already active" in exc_info.value.detail
+
+
+def test_promote_index_version_success():
+    """Verifies that index version promotion successfully updates repository and purges older indexes."""
+    mock_db = MagicMock()
+    mock_table = MagicMock()
+    mock_table.update.return_value = mock_table
+    mock_table.delete.return_value = mock_table
+    mock_table.eq.return_value = mock_table
+    mock_table.neq.return_value = mock_table
+    mock_db.table.return_value = mock_table
+
+    DatabaseAdapter.promote_index_version(mock_db, "user-123", "repo-123", "job-123", "v2", "sha-abc")
+
+    # Assert repository active version promoted
+    mock_db.table.assert_any_call("user_repositories")
+    # Assert code snippets cleanup of other versions called
+    mock_db.table.assert_any_call("code_snippets")
+
+
+def test_fail_and_cleanup_job_success():
+    """Verifies failed job cleans up target job snippets without affecting other users."""
+    mock_db = MagicMock()
+    mock_table = MagicMock()
+    mock_table.update.return_value = mock_table
+    mock_table.delete.return_value = mock_table
+    mock_table.eq.return_value = mock_table
+    mock_db.table.return_value = mock_table
+
+    DatabaseAdapter.fail_and_cleanup_job(mock_db, "user-123", "repo-123", "job-123", "TimeoutError")
+
+    # Assert update on job & repo
+    mock_db.table.assert_any_call("ingestion_jobs")
+    # Assert snippets delete on job_id
+    mock_db.table.assert_any_call("code_snippets")
+
+
+def test_service_role_key_not_exposed_in_frontend():
+    """Proves that frontend source code has zero references to service role variables."""
+    frontend_dir = "./coderag-frontend"
+    if not os.path.exists(frontend_dir):
+        return
+
+    for root, dirs, files in os.walk(frontend_dir):
+        if "node_modules" in root or "dist" in root:
+            continue
+        for file in files:
+            if file.endswith((".js", ".jsx", ".ts", ".tsx", ".html")):
+                with open(os.path.join(root, file), "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                    assert "SUPABASE_SERVICE_ROLE_KEY" not in content
+                    assert "SERVICE_ROLE" not in content
+
+
+def test_sql_migration_static_checks():
+    """Static checks for phase 5 schema migration SQL artifact."""
+    migration_file = "supabase_phase5_migration.sql"
+    assert os.path.exists(migration_file), "Migration file must exist"
+
+    with open(migration_file, "r", encoding="utf-8") as f:
+        sql = f.read()
+
+    # Idempotent checks
+    assert "CREATE TABLE IF NOT EXISTS user_repositories" in sql
+    assert "CREATE TABLE IF NOT EXISTS ingestion_jobs" in sql
+    assert "CREATE INDEX IF NOT EXISTS" in sql
+
+    # RLS checks
+    assert "ALTER TABLE user_repositories ENABLE ROW LEVEL SECURITY;" in sql
+    assert "ALTER TABLE ingestion_jobs ENABLE ROW LEVEL SECURITY;" in sql
+    assert "ALTER TABLE code_snippets ENABLE ROW LEVEL SECURITY;" in sql
+
+    # Policies checks
+    assert "auth.uid() = user_id" in sql
+    assert "auth.uid()::text = user_id" in sql
+
+    # Invoker & Search Path checks
+    assert "SECURITY INVOKER" in sql
+    assert "SET search_path = public, pg_temp" in sql
+
+    # Idempotency and Non-Execution Status
+    assert "NOT YET APPLIED TO LIVE PRODUCTION" in sql
+    assert "DELETE FROM" not in sql
+
+
 

@@ -82,7 +82,8 @@ def is_binary_file(file_path: str) -> bool:
 
 
 class CodeIndexer:
-    def __init__(self, repos_path: str = None, repo_url: str = None, repo_name: str = None, limits: IngestionLimits = DEFAULT_LIMITS):
+    def __init__(self, repos_path: str = None, repo_url: str = None, repo_name: str = None, limits: IngestionLimits = DEFAULT_LIMITS,
+                 repository_id: Optional[str] = None, ingestion_job_id: Optional[str] = None, index_version: str = "v1", commit_sha: Optional[str] = None):
         self.embedder = None
         self.db = None
         self.indexed_count = 0
@@ -93,6 +94,10 @@ class CodeIndexer:
         self.repo_url = repo_url
         self.repo_name = repo_name
         self.limits = limits
+        self.repository_id = repository_id
+        self.ingestion_job_id = ingestion_job_id
+        self.index_version = index_version
+        self.commit_sha = commit_sha
 
     def initialize(self) -> bool:
         """Initialize embedder and database connection"""
@@ -338,6 +343,10 @@ class CodeIndexer:
                     "embedding": embedding,
                     "source_url": snippet["source_url"],
                     "user_id": self.user_id,
+                    "repository_id": self.repository_id,
+                    "ingestion_job_id": self.ingestion_job_id,
+                    "index_version": self.index_version,
+                    "commit_sha": self.commit_sha,
                 }
 
                 result = self.db.table("code_snippets").insert(data).execute()
