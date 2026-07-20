@@ -137,6 +137,7 @@ def get_cached_query(
 ):
     """
     Reads query cache strictly matching canonical SHA-256 hash and user_id (valid for 24 hours).
+    Dynamically unpacks rich timing and summary metadata from sources_json.
     """
     if not user_id:
         return None
@@ -163,11 +164,27 @@ def get_cached_query(
             ''', (key, user_id))
             row = cursor.fetchone()
             if row:
-                return {
-                    "answer": row["answer"],
-                    "sources": json.loads(row["sources_json"]),
-                    "confidence": row["confidence"]
-                }
+                sources_data = json.loads(row["sources_json"])
+                # Handle rich unpacked format
+                if isinstance(sources_data, dict) and "sources" in sources_data:
+                    return {
+                        "answer": row["answer"],
+                        "sources": sources_data["sources"],
+                        "summary": sources_data.get("summary"),
+                        "limitations": sources_data.get("limitations", []),
+                        "metadata": sources_data.get("metadata"),
+                        "confidence": row["confidence"]
+                    }
+                else:
+                    # Legacy fallback
+                    return {
+                        "answer": row["answer"],
+                        "sources": sources_data,
+                        "summary": None,
+                        "limitations": [],
+                        "metadata": None,
+                        "confidence": row["confidence"]
+                    }
     except Exception as e:
         logger.error("Telemetry cache read failed [op=cache_read, exc_type=%s]", type(e).__name__)
     return None
@@ -186,9 +203,13 @@ def set_cached_query(
     retrieval_strategy: str = "hybrid_v1",
     prompt_version: str = "v1",
     history: Optional[List[Dict[str, Any]]] = None,
+    summary: Optional[str] = None,
+    limitations: Optional[list] = None,
+    metadata: Optional[dict] = None,
 ):
     """
     Writes query cache strictly scoped by canonical SHA-256 hash and authenticated user_id.
+    Packs timing, summary, and limitations metadata directly inside sources_json.
     """
     if not user_id:
         return
@@ -205,11 +226,19 @@ def set_cached_query(
             prompt_version=prompt_version,
             history=history,
         )
+        
+        packed_data = {
+            "sources": sources,
+            "summary": summary,
+            "limitations": limitations or [],
+            "metadata": metadata
+        }
+        
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute('''
                 INSERT OR REPLACE INTO query_cache (query_hash, user_id, repo_filter, answer, sources_json, confidence)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (key, user_id, repo_filter or "ALL", answer, json.dumps(sources), confidence))
+            ''', (key, user_id, repo_filter or "ALL", answer, json.dumps(packed_data), confidence))
     except Exception as e:
         logger.error("Telemetry cache write failed [op=cache_write, exc_type=%s]", type(e).__name__)
 

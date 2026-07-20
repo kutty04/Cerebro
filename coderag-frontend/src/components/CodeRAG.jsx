@@ -380,12 +380,49 @@ export default function Cerebro({ user }) {
                     <Sparkles className="neon-icon" size={20} />
                     <h2>Synthesized Answer</h2>
                     <span className="confidence-badge">
-                      {results.confidence}% Confidence
+                      {results.metadata?.retrievalStrategy ? `Grounded (${results.metadata.retrievalStrategy})` : 'Grounded'}
                     </span>
                   </div>
+                  
+                  {results.summary && (
+                    <p style={{ fontSize: '0.9rem', color: '#94a3b8', fontStyle: 'italic', marginBottom: '1rem', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '0.5rem' }}>
+                      <strong>Summary:</strong> {results.summary}
+                    </p>
+                  )}
+
                   <div className="answer-content">
                     {results.answer}
                   </div>
+
+                  {results.limitations && results.limitations.length > 0 && (
+                    <div style={{ marginTop: '1.25rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.75rem' }}>
+                      <h4 style={{ fontSize: '0.8rem', color: '#f43f5e', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.35rem', fontWeight: 600 }}>
+                        Retrieved Context Limitations:
+                      </h4>
+                      <ul style={{ paddingLeft: '1.2rem', color: '#cbd5e1', fontSize: '0.82rem', listStyleType: 'square', margin: 0 }}>
+                        {results.limitations.map((limit, idx) => (
+                          <li key={idx} style={{ marginBottom: '0.2rem' }}>{limit}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {results.metadata && (
+                    <div style={{ display: 'flex', gap: '1rem', fontSize: '0.75rem', color: '#64748b', marginTop: '1.25rem', flexWrap: 'wrap', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '0.5rem' }}>
+                      {results.metadata.retrievalTimeMs !== undefined && (
+                        <span>🔍 Retrieval: {results.metadata.retrievalTimeMs}ms</span>
+                      )}
+                      {results.metadata.generationTimeMs !== undefined && (
+                        <span>🧠 AI Gen: {results.metadata.generationTimeMs}ms</span>
+                      )}
+                      {results.metadata.totalTimeMs !== undefined && (
+                        <span>⚡ Total: {results.metadata.totalTimeMs}ms</span>
+                      )}
+                      {results.metadata.sourcesRetrieved !== undefined && (
+                        <span>📂 Sources: {results.metadata.sourcesRetrieved} (Retrieved) / {results.metadata.sourcesCited || 0} (Cited)</span>
+                      )}
+                    </div>
+                  )}
 
                   {results.follow_ups && results.follow_ups.length > 0 && (
                     <div className="follow-ups-section">
@@ -410,7 +447,14 @@ export default function Cerebro({ user }) {
                         return (
                           <div key={idx} className="source-card">
                             <div className="source-header">
-                              <span className="source-file">{source.file}</span>
+                              <span className="source-file">
+                                {source.file}
+                                {source.match_type && (
+                                  <span style={{ fontSize: '0.72rem', padding: '0.1rem 0.4rem', borderRadius: '4px', background: 'rgba(255,255,255,0.06)', color: '#64748b', marginLeft: '0.5rem', fontWeight: 500 }}>
+                                    {source.match_type} {source.retrieval_rank ? `#${source.retrieval_rank}` : ''}
+                                  </span>
+                                )}
+                              </span>
                               {info.link !== '#' ? (
                                 <a href={info.link} target="_blank" rel="noopener noreferrer" className="source-link">
                                   {info.icon} {info.label}
