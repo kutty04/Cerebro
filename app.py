@@ -4,11 +4,11 @@ from pydantic import BaseModel, Field
 import supabase
 import os
 import re
+import subprocess
 from typing import Optional, List, Dict, Any
 import logging
 from dotenv import load_dotenv
 import time
-import git
 import shutil
 import tempfile
 from pathlib import Path
@@ -24,6 +24,12 @@ from telemetry import (
     get_chat_history,
     get_cached_query,
     set_cached_query,
+)
+from ingestion_validator import (
+    DEFAULT_LIMITS,
+    concurrency_manager,
+    validate_and_normalize_github_url,
+    validate_dns_ip_safety,
 )
 
 load_dotenv(override=True)
@@ -551,44 +557,136 @@ async def index_snippet(request: IndexRequest):
 @app.post("/ingest")
 async def ingest_repo(request: IngestRequest):
     """
-    Clone a GitHub repo, index it for a specific user, and clean up.
+    Harden repository ingestion against SSRF, unsafe protocols, resource exhaustion, and path traversal.
+    Clones GitHub repository using strict shallow HTTPS clone, indexes snippets, and cleans up.
     """
-    temp_dir = tempfile.mkdtemp()
+    if not db:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database client is not initialized.")
+
+    # Step 1: URL validation & canonical normalization
+    canonical_url = validate_and_normalize_github_url(request.repo_url)
+
+    # Step 2: DNS resolution & SSRF IP safety check
+    if not validate_dns_ip_safety("github.com"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Repository network destination is unreachable or restricted.",
+        )
+
+    # Step 3: Concurrency check & lock acquisition
+    concurrency_manager.acquire(request.user_id, canonical_url)
+
+    temp_dir = tempfile.mkdtemp(prefix="cerebro_ingest_")
+    inserted_snippet_ids: List[int] = []
+    repo_name = canonical_url.split("/")[-1]
+
     try:
-        logger.info(f"🚀 Ingesting repo: {request.repo_url} for user: {request.user_id}")
+        logger.info(f"🚀 Ingesting repo: {canonical_url} for user: {request.user_id}")
 
-        # Basic URL check
-        if not request.repo_url.startswith("https://"):
-            raise HTTPException(status_code=400, detail="Only HTTPS repository URLs are supported.")
+        # Step 4: Safe subprocess git clone (depth 1, single branch, submodules disabled, redirects blocked)
+        env = os.environ.copy()
+        env["GIT_ALLOW_PROTOCOL"] = "https"
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
 
-        git.Repo.clone_from(request.repo_url, temp_dir, depth=1)
+        cmd = [
+            "git",
+            "-c", "http.followRedirects=false",
+            "-c", "core.symlinks=false",
+            "clone",
+            "--depth", "1",
+            "--no-recurse-submodules",
+            "--single-branch",
+            canonical_url,
+            temp_dir,
+        ]
 
-        repo_name = request.repo_url.rstrip("/").split("/")[-1].replace(".git", "")
+        try:
+            clone_res = subprocess.run(
+                cmd,
+                env=env,
+                timeout=DEFAULT_LIMITS.MAX_REPO_CLONE_TIMEOUT_SEC,
+                capture_output=True,
+                text=True,
+            )
+            if clone_res.returncode != 0:
+                logger.error("Git clone returned non-zero exit code [op=ingest_clone]")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Repository inaccessible, private, or not found.",
+                )
+        except subprocess.TimeoutExpired:
+            logger.error("Git clone process timed out [op=ingest_clone]")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Repository clone timed out.",
+            )
 
-        indexer = CodeIndexer(repos_path=temp_dir, repo_url=request.repo_url, repo_name=repo_name)
-        if not indexer.initialize():
-            raise HTTPException(status_code=500, detail="Indexer initialization failed")
+        # Step 5: Disk size pre-scan check
+        try:
+            total_disk_bytes = sum(
+                f.stat().st_size for f in Path(temp_dir).rglob("*") if f.is_file() and not f.is_symlink()
+            )
+            if total_disk_bytes > DEFAULT_LIMITS.MAX_REPO_DISK_SIZE_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="Repository exceeds maximum disk size limit (50MB).",
+                )
+        except HTTPException:
+            raise
+        except Exception as disk_e:
+            logger.error("Disk pre-scan check failed [op=ingest_disk_scan, exc_type=%s]", type(disk_e).__name__)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to inspect repository filesystem.",
+            )
 
+        # Step 6: Initialize Indexer and scan files
+        indexer = CodeIndexer(repos_path=temp_dir, repo_url=canonical_url, repo_name=repo_name, limits=DEFAULT_LIMITS)
+        indexer.db = db
         indexer.user_id = request.user_id
 
         snippets = indexer.scan_repos()
         if not snippets:
-            return {"status": "success", "message": "No indexable code found in repository", "indexed_count": 0}
+            return {
+                "status": "success",
+                "message": "No indexable code found in repository",
+                "indexed_count": 0,
+            }
 
-        indexer.index_snippets(snippets)
+        # Step 7: Index snippets & record inserted IDs
+        inserted_snippet_ids = indexer.index_snippets(snippets)
 
         return {
             "status": "success",
-            "message": f"Successfully indexed {len(snippets)} snippets from {request.repo_url}",
-            "indexed_count": len(snippets),
+            "message": f"Successfully indexed {len(inserted_snippet_ids)} snippets from {canonical_url}",
+            "indexed_count": len(inserted_snippet_ids),
         }
 
     except HTTPException:
+        # Rollback database inserts on HTTP exception failure
+        if inserted_snippet_ids and db:
+            try:
+                db.table("code_snippets").delete().in_("id", inserted_snippet_ids).execute()
+                logger.info("Rolled back partially inserted snippet records [op=ingest_rollback]")
+            except Exception as rb_e:
+                logger.error("Database rollback failed [op=ingest_rollback, exc_type=%s]", type(rb_e).__name__)
         raise
     except Exception as e:
-        logger.error("Ingestion failed [op=ingest_repo, exc_type=%s]", type(e).__name__)
-        raise HTTPException(status_code=500, detail="Ingestion failed due to an internal error.")
+        logger.error("Ingestion failed unexpectedly [op=ingest_repo, exc_type=%s]", type(e).__name__)
+        if inserted_snippet_ids and db:
+            try:
+                db.table("code_snippets").delete().in_("id", inserted_snippet_ids).execute()
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ingestion failed due to an internal error.",
+        )
     finally:
+        # Step 8: Always release concurrency lock & clean temporary directory
+        concurrency_manager.release(request.user_id, canonical_url)
+
         def onerror(func, path, exc_info):
             import stat
             if not os.access(path, os.W_OK):

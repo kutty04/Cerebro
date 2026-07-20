@@ -7,6 +7,9 @@ from typing import List, Tuple, Optional
 import json
 import requests
 from dotenv import load_dotenv
+from fastapi import HTTPException, status
+
+from ingestion_validator import DEFAULT_LIMITS, IngestionLimits
 
 load_dotenv()
 
@@ -68,8 +71,18 @@ SKIP_FOLDERS = {
 }
 
 
+def is_binary_file(file_path: str) -> bool:
+    """Checks if file contains null bytes in initial 1024 bytes"""
+    try:
+        with open(file_path, "rb") as f:
+            chunk = f.read(1024)
+            return b"\x00" in chunk
+    except Exception:
+        return True
+
+
 class CodeIndexer:
-    def __init__(self, repos_path: str = None, repo_url: str = None, repo_name: str = None):
+    def __init__(self, repos_path: str = None, repo_url: str = None, repo_name: str = None, limits: IngestionLimits = DEFAULT_LIMITS):
         self.embedder = None
         self.db = None
         self.indexed_count = 0
@@ -79,6 +92,7 @@ class CodeIndexer:
         self.repos_path = repos_path or REPOS_PATH
         self.repo_url = repo_url
         self.repo_name = repo_name
+        self.limits = limits
 
     def initialize(self) -> bool:
         """Initialize embedder and database connection"""
@@ -94,11 +108,13 @@ class CodeIndexer:
             return False
 
         try:
-            if not SUPABASE_URL or not SUPABASE_KEY:
+            url = os.getenv("SUPABASE_URL") or SUPABASE_URL
+            key = os.getenv("SUPABASE_KEY") or SUPABASE_KEY
+            if not url or not key:
                 logger.error("❌ Missing SUPABASE_URL or SUPABASE_KEY environment variables")
                 return False
 
-            self.db = supabase.create_client(SUPABASE_URL, SUPABASE_KEY)
+            self.db = supabase.create_client(url, key)
             logger.info("✅ Supabase connected")
         except Exception as e:
             logger.error("Failed to connect to Supabase [op=indexer_init, exc_type=%s]", type(e).__name__)
@@ -153,14 +169,18 @@ class CodeIndexer:
         return chunks if chunks else [(f"/* METADATA -> File: {file_path} */\n{code}", 1)]
 
     def scan_repos(self) -> List[dict]:
-        """Scan all repos and collect code snippets"""
+        """Scan all repos and collect code snippets with resource limits and path safety"""
         logger.info(f"📂 Scanning repos from: {self.repos_path}")
 
-        if not os.path.exists(self.repos_path):
+        root_path_obj = Path(self.repos_path).resolve()
+        if not root_path_obj.exists():
             logger.error(f"❌ Directory not found: {self.repos_path}")
             return []
 
         snippets = []
+        files_scanned = 0
+        total_indexed_bytes = 0
+        total_chunks = 0
 
         for root, dirs, files in os.walk(self.repos_path):
             dirs[:] = [d for d in dirs if not self.should_skip_folder(d)]
@@ -170,8 +190,48 @@ class CodeIndexer:
 
             for file in files:
                 file_path = os.path.join(root, file)
+                file_path_obj = Path(file_path)
+
+                # Symlink safety check & path containment check
+                if file_path_obj.is_symlink():
+                    logger.warning("Skipping symlink [op=scan_repos]")
+                    continue
+
+                try:
+                    resolved_file = file_path_obj.resolve()
+                    if not resolved_file.is_relative_to(root_path_obj):
+                        logger.warning("Path traversal attempt blocked [op=scan_repos]")
+                        continue
+                except Exception:
+                    continue
 
                 if self.should_skip_file(file_path):
+                    continue
+
+                files_scanned += 1
+                if files_scanned > self.limits.MAX_REPO_FILES_SCANNED:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="Repository exceeds maximum file scan limit.",
+                    )
+
+                rel_file_path = os.path.relpath(file_path, self.repos_path)
+                if len(rel_file_path) > self.limits.MAX_PATH_LENGTH:
+                    logger.warning("Skipping oversized path length [op=scan_repos]")
+                    continue
+
+                # File size check
+                try:
+                    file_size = file_path_obj.stat().st_size
+                    if file_size > self.limits.MAX_FILE_SIZE_BYTES:
+                        logger.warning("Skipping oversized file [op=scan_repos]")
+                        continue
+                except Exception:
+                    continue
+
+                # Binary file check
+                if is_binary_file(file_path):
+                    logger.warning("Skipping binary file [op=scan_repos]")
                     continue
 
                 try:
@@ -181,11 +241,23 @@ class CodeIndexer:
                     if not code.strip():
                         continue
 
-                    ext = Path(file_path).suffix.lower()
-                    language = CODE_EXTENSIONS.get(ext, "text")
-                    rel_file_path = os.path.relpath(file_path, self.repos_path)
+                    code_bytes = len(code.encode("utf-8"))
+                    if total_indexed_bytes + code_bytes > self.limits.MAX_TOTAL_INDEXED_BYTES:
+                        raise HTTPException(
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail="Repository exceeds maximum total indexed content size limit.",
+                        )
 
-                    chunks = self.chunk_code(code, file_path)
+                    ext = file_path_obj.suffix.lower()
+                    language = CODE_EXTENSIONS.get(ext, "text")
+
+                    chunks = self.chunk_code(code, rel_file_path)
+
+                    if total_chunks + len(chunks) > self.limits.MAX_TOTAL_CHUNKS:
+                        raise HTTPException(
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail="Repository exceeds maximum chunk count limit.",
+                        )
 
                     for chunk_text, start_line in chunks:
                         source_url = self.repo_url if self.repo_url else f"file://{file_path}"
@@ -203,8 +275,13 @@ class CodeIndexer:
                         }
                         snippets.append(snippet)
 
+                    total_indexed_bytes += code_bytes
+                    total_chunks += len(chunks)
+
                     logger.info(f"✅ Scanned {rel_file_path} ({language}) - {len(chunks)} chunks")
 
+                except HTTPException:
+                    raise
                 except Exception as e:
                     logger.warning("Failed to read file [op=scan_repos, exc_type=%s]", type(e).__name__)
                     continue
@@ -235,13 +312,14 @@ class CodeIndexer:
             logger.error("Embedding exception [op=get_serverless_embedding, exc_type=%s]", type(e).__name__)
             return None
 
-    def index_snippets(self, snippets: List[dict]) -> None:
-        """Generate embeddings and index snippets in Supabase"""
+    def index_snippets(self, snippets: List[dict]) -> List[int]:
+        """Generate embeddings and index snippets in Supabase. Returns list of inserted snippet IDs."""
         if not snippets:
             logger.warning("⚠️ No snippets to index")
-            return
+            return []
 
         logger.info(f"🔄 Indexing {len(snippets)} snippets...")
+        inserted_ids = []
 
         for i, snippet in enumerate(snippets, 1):
             try:
@@ -259,10 +337,12 @@ class CodeIndexer:
                     "code_content": snippet["code_content"],
                     "embedding": embedding,
                     "source_url": snippet["source_url"],
-                    "user_id": self.user_id
+                    "user_id": self.user_id,
                 }
 
                 result = self.db.table("code_snippets").insert(data).execute()
+                if result.data and len(result.data) > 0:
+                    inserted_ids.append(result.data[0].get("id"))
                 self.indexed_count += 1
 
                 if i % 10 == 0:
@@ -275,6 +355,14 @@ class CodeIndexer:
         logger.info(f"✅ Indexing complete!")
         logger.info(f"📊 Successfully indexed: {self.indexed_count}")
         logger.info(f"❌ Failed: {self.failed_count}")
+
+        if snippets and self.indexed_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to index code snippets into database.",
+            )
+
+        return inserted_ids
 
     def run(self) -> bool:
         """Run the full indexing pipeline"""

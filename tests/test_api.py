@@ -241,7 +241,8 @@ def test_index_endpoint_validation(client):
     assert response.status_code == 422
 
 
-def test_ingest_endpoint_non_https_validation(client):
+@patch("app.db")
+def test_ingest_endpoint_non_https_validation(mock_db, client):
     payload = {
         "repo_url": "http://github.com/user/repo",
         "user_id": "user-123",
