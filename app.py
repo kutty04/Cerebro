@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, Query, status, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import supabase
@@ -154,7 +154,7 @@ def get_embedding(text: str) -> Optional[List[float]]:
                 return res
             return res
         else:
-            logger.error(f"HF Embedding API returned status {response.status_code}: {response.text}")
+            logger.error(f"HF Embedding API returned status {response.status_code}")
             return None
     except requests.exceptions.Timeout:
         logger.error("⏱️ HF Embedding API timed out")
@@ -164,7 +164,7 @@ def get_embedding(text: str) -> Optional[List[float]]:
         return None
 
 
-# Health check endpoint
+# Health check endpoint (Liveness probe)
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     is_hf_ready = os.getenv("HF_TOKEN") is not None
@@ -177,32 +177,45 @@ async def health_check():
     }
 
 
-# Readiness probe endpoint
+# Readiness probe endpoint (Orchestration readiness check: HTTP 200 if ready, HTTP 503 if degraded)
 @app.get("/readiness", response_model=ReadinessResponse)
-async def readiness_check():
+async def readiness_check(response: Response):
     is_hf_ready = os.getenv("HF_TOKEN") is not None
-    return {
-        "status": "ready" if (db is not None and is_hf_ready) else "degraded",
-        "database": "connected" if db is not None else "disconnected",
-        "embeddings": "ready" if is_hf_ready else "unconfigured",
-        "llm": "ready" if is_hf_ready else "unconfigured",
-    }
+    is_db_ready = db is not None
+
+    if is_db_ready and is_hf_ready:
+        response.status_code = status.HTTP_200_OK
+        return {
+            "status": "ready",
+            "database": "connected",
+            "embeddings": "ready",
+            "llm": "ready",
+        }
+    else:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {
+            "status": "degraded",
+            "database": "connected" if is_db_ready else "disconnected",
+            "embeddings": "ready" if is_hf_ready else "unconfigured",
+            "llm": "ready" if is_hf_ready else "unconfigured",
+        }
 
 
 # Search endpoint
 @app.post("/search", response_model=SearchResponse)
 async def search(request: SearchRequest):
     """
-    Search codebases using vector similarity + LLM generation
+    Search codebases using vector similarity + LLM generation.
+    Enforces strict user isolation without silent fallback to unscoped retrieval.
     """
     if not db:
         raise HTTPException(status_code=500, detail="Database client is not initialized")
 
     start_time = time.time()
 
-    # Check SQLite Cache (0 LLM Tokens)
+    # Check SQLite Cache (User-scoped cache lookup)
     try:
-        cached = get_cached_query(request.query, request.repo_filter)
+        cached = get_cached_query(request.query, request.repo_filter, request.user_id)
         if cached:
             logger.info("🟢 Cache hit! Returning instant response (0 tokens)")
             latency_ms = (time.time() - start_time) * 1000
@@ -231,22 +244,31 @@ async def search(request: SearchRequest):
         logger.info("📚 Searching vector database...")
 
         vector_results_data = []
-        try:
-            # First attempt with p_user_id RPC signature
-            search_rpc = db.rpc(
-                "search_code_snippets",
-                {
-                    "query_embedding": query_embedding,
-                    "match_count": request.top_k,
-                    "p_user_id": request.user_id,
-                },
-            )
-            if request.repo_filter:
-                search_rpc = search_rpc.eq("repo_name", request.repo_filter)
-            res = search_rpc.execute()
-            vector_results_data = res.data or []
-        except Exception as rpc_e:
-            logger.warning(f"RPC with p_user_id failed ({rpc_e}), falling back to standard signature")
+
+        if request.user_id:
+            # User identity is present: MUST execute user-scoped RPC. FAIL CLOSED if RPC fails.
+            try:
+                search_rpc = db.rpc(
+                    "search_code_snippets",
+                    {
+                        "query_embedding": query_embedding,
+                        "match_count": request.top_k,
+                        "p_user_id": request.user_id,
+                    },
+                )
+                if request.repo_filter:
+                    search_rpc = search_rpc.eq("repo_name", request.repo_filter)
+                res = search_rpc.execute()
+                vector_results_data = res.data or []
+            except Exception as rpc_e:
+                logger.error(f"User-scoped vector search RPC failed: {rpc_e}")
+                # FAIL CLOSED: Do not perform an unscoped retry!
+                raise HTTPException(
+                    status_code=500,
+                    detail="Search service error: user isolation query could not be executed safely.",
+                )
+        else:
+            # Anonymous / global search (no user_id provided)
             try:
                 search_rpc = db.rpc(
                     "search_code_snippets",
@@ -258,16 +280,12 @@ async def search(request: SearchRequest):
                 if request.repo_filter:
                     search_rpc = search_rpc.eq("repo_name", request.repo_filter)
                 res = search_rpc.execute()
-                raw_data = res.data or []
-                if request.user_id:
-                    vector_results_data = [r for r in raw_data if r.get("user_id") == request.user_id or r.get("user_id") is None]
-                else:
-                    vector_results_data = raw_data
-            except Exception as fallback_e:
-                logger.error(f"Vector search failed completely: {fallback_e}")
+                vector_results_data = res.data or []
+            except Exception as rpc_e:
+                logger.error(f"Vector search RPC failed: {rpc_e}")
                 vector_results_data = []
 
-        # Step 2.5: Keyword Search (Exact Match Fallback)
+        # Step 2.5: Keyword Search (Exact Match Fallback - strictly user-scoped when user_id is present)
         stop_words = {
             "how", "do", "did", "i", "we", "you", "what", "is", "where", "can",
             "find", "the", "a", "an", "to", "for", "in", "of", "and", "or", "my",
@@ -446,7 +464,7 @@ FOLLOW_UPS:
         try:
             log_search(request.query, request.repo_filter, confidence, latency_ms)
             save_chat(request.user_id or "default_thread", request.query, answer_text, sources)
-            set_cached_query(request.query, request.repo_filter, answer_text, sources, confidence)
+            set_cached_query(request.query, request.repo_filter, answer_text, sources, confidence, request.user_id)
         except Exception as log_e:
             logger.warning(f"Logging failed: {log_e}")
 

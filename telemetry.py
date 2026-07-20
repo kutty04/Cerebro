@@ -2,9 +2,10 @@ import sqlite3
 import time
 import json
 import hashlib
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 DB_PATH = "coderag_telemetry.db"
+
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -38,11 +39,13 @@ def init_db():
             )
         ''')
 
-def get_cache_key(query: str, repo_filter: str) -> str:
-    raw = f"{query}_{repo_filter or 'ALL'}"
+
+def get_cache_key(query: str, repo_filter: Optional[str] = None, user_id: Optional[str] = None) -> str:
+    raw = f"{query}_{repo_filter or 'ALL'}_{user_id or 'ANON'}"
     return hashlib.md5(raw.encode()).hexdigest()
 
-def get_cached_query(query: str, repo_filter: str):
+
+def get_cached_query(query: str, repo_filter: Optional[str] = None, user_id: Optional[str] = None):
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
@@ -52,7 +55,7 @@ def get_cached_query(query: str, repo_filter: str):
                 SELECT answer, sources_json, confidence 
                 FROM query_cache 
                 WHERE query_hash = ? AND timestamp >= datetime('now', '-1 day')
-            ''', (get_cache_key(query, repo_filter),))
+            ''', (get_cache_key(query, repo_filter, user_id),))
             row = cursor.fetchone()
             if row:
                 return {
@@ -64,17 +67,19 @@ def get_cached_query(query: str, repo_filter: str):
         print(f"Cache Read Error: {e}")
     return None
 
-def set_cached_query(query: str, repo_filter: str, answer: str, sources: list, confidence: int):
+
+def set_cached_query(query: str, repo_filter: Optional[str], answer: str, sources: list, confidence: int, user_id: Optional[str] = None):
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute('''
                 INSERT OR REPLACE INTO query_cache (query_hash, answer, sources_json, confidence)
                 VALUES (?, ?, ?, ?)
-            ''', (get_cache_key(query, repo_filter), answer, json.dumps(sources), confidence))
+            ''', (get_cache_key(query, repo_filter, user_id), answer, json.dumps(sources), confidence))
     except Exception as e:
         print(f"Cache Write Error: {e}")
 
-def log_search(query: str, repo_filter: str, confidence: int, latency_ms: float):
+
+def log_search(query: str, repo_filter: Optional[str], confidence: int, latency_ms: float):
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute('''
@@ -83,6 +88,7 @@ def log_search(query: str, repo_filter: str, confidence: int, latency_ms: float)
             ''', (query, str(repo_filter) if repo_filter else "ALL", confidence, latency_ms))
     except Exception as e:
         print(f"Telemetry Error: {e}")
+
 
 def save_chat(thread_id: str, query: str, answer: str, sources: List[dict]):
     try:
@@ -94,20 +100,21 @@ def save_chat(thread_id: str, query: str, answer: str, sources: List[dict]):
     except Exception as e:
         print(f"Chat Save Error: {e}")
 
+
 def get_analytics() -> Dict:
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            
+
             # Basic stats
             cursor.execute("SELECT COUNT(*) as total_searches, AVG(latency_ms) as avg_latency, AVG(confidence) as avg_conf FROM search_logs")
             stats = dict(cursor.fetchone())
-            
+
             # Recent queries
             cursor.execute("SELECT query, confidence, latency_ms, timestamp FROM search_logs ORDER BY id DESC LIMIT 10")
             recent = [dict(row) for row in cursor.fetchall()]
-            
+
             return {
                 "total_searches": stats["total_searches"] or 0,
                 "avg_latency_ms": round(stats["avg_latency"] or 0, 2),
@@ -117,6 +124,7 @@ def get_analytics() -> Dict:
     except Exception as e:
         print(f"Analytics Error: {e}")
         return {}
+
 
 def get_chat_history() -> List[Dict]:
     try:

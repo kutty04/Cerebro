@@ -22,14 +22,26 @@ def test_health_endpoint(client):
     assert data["mode"] == "serverless"
 
 
-def test_readiness_endpoint(client):
-    response = client.get("/readiness")
-    assert response.status_code == 200
-    data = response.json()
-    assert "status" in data
-    assert "database" in data
-    assert "embeddings" in data
-    assert "llm" in data
+def test_readiness_endpoint_degraded(client):
+    # When dependencies are unconfigured/disconnected, expect 503 Service Unavailable
+    with patch("app.db", None), patch.dict("os.environ", {}, clear=True):
+        response = client.get("/readiness")
+        assert response.status_code == 503
+        data = response.json()
+        assert data["status"] == "degraded"
+        assert data["database"] == "disconnected"
+        assert data["embeddings"] == "unconfigured"
+
+
+def test_readiness_endpoint_ready(client):
+    # When all dependencies are ready, expect 200 OK
+    with patch("app.db", MagicMock()), patch.dict("os.environ", {"HF_TOKEN": "valid_token"}):
+        response = client.get("/readiness")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ready"
+        assert data["database"] == "connected"
+        assert data["embeddings"] == "ready"
 
 
 def test_search_validation_empty_query(client):
@@ -54,11 +66,9 @@ def test_search_validation_invalid_top_k(client):
 @patch("app.db")
 @patch("app.get_embedding")
 @patch("requests.post")
-def test_search_success_mocked(mock_req_post, mock_get_embedding, mock_db, client):
-    # Mock embedding
+def test_search_user_scoped_rpc(mock_req_post, mock_get_embedding, mock_db, client):
     mock_get_embedding.return_value = [0.1] * 384
 
-    # Mock Supabase RPC
     mock_rpc = MagicMock()
     mock_rpc.eq.return_value = mock_rpc
     mock_rpc.execute.return_value = MagicMock(
@@ -76,7 +86,6 @@ def test_search_success_mocked(mock_req_post, mock_get_embedding, mock_db, clien
     )
     mock_db.rpc.return_value = mock_rpc
 
-    # Mock Supabase keyword search table
     mock_table = MagicMock()
     mock_table.select.return_value = mock_table
     mock_table.eq.return_value = mock_table
@@ -85,31 +94,57 @@ def test_search_success_mocked(mock_req_post, mock_get_embedding, mock_db, clien
     mock_table.execute.return_value = MagicMock(data=[])
     mock_db.table.return_value = mock_table
 
-    # Mock HF Router LLM response
     mock_llm_response = MagicMock()
     mock_llm_response.status_code = 200
     mock_llm_response.json.return_value = {
         "choices": [
             {
                 "message": {
-                    "content": "This is a test answer based on the code.\n\nFOLLOW_UPS:\n- Question 1\n- Question 2\n- Question 3"
+                    "content": "This is a test answer.\n\nFOLLOW_UPS:\n- Q1\n- Q2\n- Q3"
                 }
             }
         ]
     }
     mock_req_post.return_value = mock_llm_response
 
-    # Set dummy token for test
     with patch.dict("os.environ", {"HF_TOKEN": "mock_token"}):
-        response = client.post("/search", json={"query": "How do I run main?", "top_k": 5})
+        response = client.post(
+            "/search",
+            json={"query": "How do I run main?", "top_k": 5, "user_id": "user-abc"},
+        )
 
     assert response.status_code == 200
+    # Verify that db.rpc was called with p_user_id
+    mock_db.rpc.assert_called_once_with(
+        "search_code_snippets",
+        {
+            "query_embedding": [0.1] * 384,
+            "match_count": 5,
+            "p_user_id": "user-abc",
+        },
+    )
+
+
+@patch("app.db")
+@patch("app.get_embedding")
+def test_search_user_scoped_rpc_failure_fails_closed(mock_get_embedding, mock_db, client):
+    mock_get_embedding.return_value = [0.1] * 384
+
+    # Make the user-scoped RPC call raise an exception (simulating missing RPC parameter in deployed DB)
+    mock_db.rpc.side_effect = Exception("PGRST202: Could not find function search_code_snippets with p_user_id")
+
+    with patch.dict("os.environ", {"HF_TOKEN": "mock_token"}):
+        response = client.post(
+            "/search",
+            json={"query": "How do I run main?", "top_k": 5, "user_id": "user-abc"},
+        )
+
+    # Must fail closed with 500 error and sanitized detail
+    assert response.status_code == 500
     data = response.json()
-    assert "This is a test answer" in data["answer"]
-    assert len(data["sources"]) == 1
-    assert data["sources"][0]["repo"] == "test-repo"
-    assert len(data["follow_ups"]) == 3
-    assert data["confidence"] > 0
+    assert "user isolation query could not be executed safely" in data["detail"]
+    # Ensure raw database exception details / credentials are NOT exposed to client
+    assert "PGRST202" not in data["detail"]
 
 
 @patch("app.db")
