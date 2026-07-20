@@ -93,6 +93,29 @@ def validate_startup_config() -> bool:
             logger.error("Configuration validation failed: wildcard CORS (*) is not permitted")
             return False
 
+    # In production mode, CORS_ALLOWED_ORIGINS must be explicitly configured
+    # with at least one valid HTTPS origin.
+    is_prod = (
+        os.getenv("CEREBRO_ENV") == "production"
+        or os.getenv("APP_ENV") == "production"
+        or os.getenv("PRODUCTION", "").lower() == "true"
+    )
+    if is_prod:
+        if not cors_env:
+            logger.error(
+                "Configuration validation failed: CORS_ALLOWED_ORIGINS must be set "
+                "in production mode (e.g. CORS_ALLOWED_ORIGINS=https://cerebro-delta-silk.vercel.app)"
+            )
+            return False
+        # Validate at least one valid origin exists
+        valid = parse_cors_origins(cors_env, is_prod=True)
+        if not valid:
+            logger.error(
+                "Configuration validation failed: CORS_ALLOWED_ORIGINS contains no "
+                "valid HTTPS origins for production mode"
+            )
+            return False
+
     return True
 
 
@@ -276,13 +299,17 @@ def _build_cors_origins() -> list[str]:
         return origins
 
     # No explicit configuration — use safe development defaults.
-    # Production deployments must set CORS_ALLOWED_ORIGINS explicitly.
+    # Production deployments MUST set CORS_ALLOWED_ORIGINS explicitly.
     if is_prod:
-        logger.warning(
+        # In production with no valid CORS config, return an empty list.
+        # validate_startup_config() will have already logged the error and
+        # the lifespan will raise RuntimeError before serving any traffic.
+        logger.error(
             "CORS: CORS_ALLOWED_ORIGINS is not set in production mode. "
-            "Only localhost origins are allowed. Set CORS_ALLOWED_ORIGINS to "
-            "the real frontend origin (e.g. https://cerebro-delta-silk.vercel.app)."
+            "No origins will be allowed. Set CORS_ALLOWED_ORIGINS to the "
+            "real frontend origin (e.g. https://cerebro-delta-silk.vercel.app)."
         )
+        return []
     return list(_SAFE_DEV_ORIGINS)
 
 

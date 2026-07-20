@@ -671,3 +671,136 @@ def test_cors_validates_startup_wildcard_rejection():
         "CORS_ALLOWED_ORIGINS": "https://cerebro-delta-silk.vercel.app,*",
     }):
         assert validate_startup_config() is False
+
+
+# ----------------------------------------------------------------------
+# PRODUCTION CORS STARTUP ENFORCEMENT TESTS
+# ----------------------------------------------------------------------
+
+def _prod_env(**extra):
+    """Helper: return a dict of valid prod creds + any extra overrides."""
+    base = {
+        "SUPABASE_URL": "https://example.supabase.co",
+        "SUPABASE_SERVICE_ROLE_KEY": "valid-key-abc123",
+        "HF_TOKEN": "valid-hf-token-abc",
+        "PRODUCTION": "true",
+    }
+    base.update(extra)
+    return base
+
+
+def test_cors_prod_valid_vercel_origin_passes():
+    """Production mode with a valid Vercel HTTPS origin must pass."""
+    from app import validate_startup_config
+    with patch.dict(os.environ, _prod_env(
+        CORS_ALLOWED_ORIGINS="https://cerebro-delta-silk.vercel.app"
+    ), clear=True):
+        assert validate_startup_config() is True
+
+
+def test_cors_prod_explicit_preview_origin_passes():
+    """Production mode with an explicit individually-listed preview URL must pass."""
+    from app import validate_startup_config
+    with patch.dict(os.environ, _prod_env(
+        CORS_ALLOWED_ORIGINS=(
+            "https://cerebro-delta-silk.vercel.app,"
+            "https://cerebro-git-feature-xyz-team.vercel.app"
+        )
+    ), clear=True):
+        assert validate_startup_config() is True
+
+
+def test_cors_prod_missing_origins_fails():
+    """Production mode with no CORS_ALLOWED_ORIGINS must fail startup."""
+    from app import validate_startup_config
+    env = _prod_env()
+    env.pop("CORS_ALLOWED_ORIGINS", None)
+    with patch.dict(os.environ, env, clear=True):
+        assert validate_startup_config() is False
+
+
+def test_cors_prod_empty_origins_fails():
+    """Production mode with empty CORS_ALLOWED_ORIGINS must fail startup."""
+    from app import validate_startup_config
+    with patch.dict(os.environ, _prod_env(CORS_ALLOWED_ORIGINS=""), clear=True):
+        assert validate_startup_config() is False
+
+
+def test_cors_prod_wildcard_fails():
+    """Production mode with wildcard CORS_ALLOWED_ORIGINS must fail startup."""
+    from app import validate_startup_config
+    with patch.dict(os.environ, _prod_env(CORS_ALLOWED_ORIGINS="*"), clear=True):
+        assert validate_startup_config() is False
+
+
+def test_cors_prod_malformed_origin_fails():
+    """Production mode with only malformed/invalid origins must fail startup."""
+    from app import validate_startup_config
+    with patch.dict(os.environ, _prod_env(
+        CORS_ALLOWED_ORIGINS="not-a-url"
+    ), clear=True):
+        assert validate_startup_config() is False
+
+
+def test_cors_prod_http_non_localhost_fails():
+    """Production mode with HTTP (non-HTTPS) external origin must fail startup."""
+    from app import validate_startup_config
+    with patch.dict(os.environ, _prod_env(
+        CORS_ALLOWED_ORIGINS="http://cerebro-delta-silk.vercel.app"
+    ), clear=True):
+        assert validate_startup_config() is False
+
+
+def test_cors_dev_defaults_work_without_env_var():
+    """Development mode with no CORS_ALLOWED_ORIGINS must not fail startup."""
+    from app import validate_startup_config
+    with patch.dict(os.environ, {
+        "SUPABASE_URL": "https://example.supabase.co",
+        "SUPABASE_SERVICE_ROLE_KEY": "valid-key-abc123",
+        "HF_TOKEN": "valid-hf-token-abc",
+        "PRODUCTION": "false",
+    }, clear=True):
+        # validate_startup_config() succeeds for dev (CORS not required)
+        assert validate_startup_config() is True
+
+
+# ----------------------------------------------------------------------
+# URL DEFAULT CONSISTENCY TEST
+# ----------------------------------------------------------------------
+
+def test_default_backend_port_is_7860():
+    """
+    The documented local backend port must be 7860 everywhere.
+    Checks: app.py __main__ default, apiClient.js fallback, vite.config.js
+    proxy/SW matcher, .env.example, README.
+    """
+    import pathlib, re
+
+    checks = {
+        "app.py": (r'os\.environ\.get\(["\']PORT["\'],\s*7860\)', True),
+        "coderag-frontend/src/apiClient.js": (r'localhost:7860', True),
+        "coderag-frontend/vite.config.js": (r'localhost:7860', True),
+        ".env.example": (r'PORT=7860', True),
+        "README.md": (r'localhost:7860', True),
+        # These must NOT contain the wrong port as a default
+        "coderag-frontend/src/apiClient.js": (r"localhost:8000", False),
+        "coderag-frontend/vite.config.js": (r"localhost:8000", False),
+    }
+
+    root = pathlib.Path(__file__).parent.parent
+    failures = []
+
+    for rel_path, (pattern, should_match) in checks.items():
+        fpath = root / rel_path
+        if not fpath.exists():
+            failures.append(f"{rel_path}: file not found")
+            continue
+        src = fpath.read_text(encoding="utf-8", errors="replace")
+        found = bool(re.search(pattern, src))
+        if found != should_match:
+            if should_match:
+                failures.append(f"{rel_path}: missing expected pattern [{pattern}]")
+            else:
+                failures.append(f"{rel_path}: found forbidden pattern [{pattern}]")
+
+    assert not failures, "URL default inconsistencies:\n" + "\n".join(f"  - {f}" for f in failures)

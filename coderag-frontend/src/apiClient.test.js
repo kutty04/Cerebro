@@ -474,3 +474,58 @@ test('46. vite.config.js does not expose real production secrets', () => {
   assert.ok(!c.includes('sbp_'), 'No Supabase service key in vite config');
   assert.ok(!c.includes('hf_'), 'No HF token in vite config');
 });
+
+
+// -------------------------------------------------------------------------
+// BACKEND PORT DEFAULT CONSISTENCY TESTS
+// Verify the default local backend port is 7860 consistently everywhere.
+// -------------------------------------------------------------------------
+
+test('47. apiClient.js default fallback uses port 7860 not 8000', () => {
+  const c = fs.readFileSync('./src/apiClient.js', 'utf-8');
+  assert.ok(c.includes('localhost:7860'), 'apiClient.js fallback must use localhost:7860');
+  assert.ok(!c.includes('localhost:8000'), 'apiClient.js must not reference localhost:8000');
+});
+
+test('48. vite.config.js SW matcher and proxy use port 7860 not 8000', () => {
+  const c = fs.readFileSync('./vite.config.js', 'utf-8');
+  assert.ok(c.includes('localhost:7860'), 'vite.config.js must reference localhost:7860');
+  assert.ok(!c.includes('localhost:8000'), 'vite.config.js must not reference localhost:8000');
+});
+
+test('49. SW matcher logic excludes local backend origin (port 7860)', () => {
+  // Replicate the urlPattern function logic from vite.config.js and verify
+  // it correctly identifies local backend requests.
+  const apiOrigin = 'http://localhost:7860';
+  const apiUrl = new URL(apiOrigin);
+
+  // Simulate a backend API request
+  const backendRequest = new URL('http://localhost:7860/search');
+  const isBackend = backendRequest.hostname === apiUrl.hostname &&
+                    backendRequest.port === apiUrl.port;
+  assert.ok(isBackend, 'SW matcher must identify localhost:7860/search as a backend request');
+
+  // Simulate a frontend static asset request (different port — Vite dev server)
+  const frontendRequest = new URL('http://localhost:3000/assets/index.js');
+  const isFrontendBackend = frontendRequest.hostname === apiUrl.hostname &&
+                             frontendRequest.port === apiUrl.port;
+  assert.ok(!isFrontendBackend, 'SW matcher must not flag localhost:3000 as a backend request');
+});
+
+test('50. SW matcher logic excludes production backend origin (HF Spaces)', () => {
+  // Simulate a production backend hosted on Hugging Face Spaces
+  // (different hostname from the frontend — correctly excluded by the origin rule)
+  const prodBackendOrigin = 'https://r-murugesan-coderag.hf.space';
+  const apiUrl = new URL(prodBackendOrigin);
+
+  const backendRequest = new URL('https://r-murugesan-coderag.hf.space/search');
+  const isBackend = backendRequest.hostname === apiUrl.hostname &&
+                    backendRequest.port === apiUrl.port;
+  assert.ok(isBackend, 'SW matcher must identify HF Space backend as a backend request');
+
+  // Frontend (Vercel) is a different hostname — must NOT be flagged
+  const frontendRequest = new URL('https://cerebro-delta-silk.vercel.app/assets/index.js');
+  const isFrontendBackend = frontendRequest.hostname === apiUrl.hostname &&
+                             frontendRequest.port === apiUrl.port;
+  assert.ok(!isFrontendBackend, 'SW matcher must not flag Vercel frontend as a backend request');
+});

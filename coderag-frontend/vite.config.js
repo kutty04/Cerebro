@@ -38,7 +38,7 @@ export default defineConfig({
         // /docs, and any route added in future phases.
         //
         // The backend origin is read from the VITE_API_URL build variable
-        // (default: http://localhost:8000).  Any request whose hostname+port
+        // (default: http://localhost:7860).  Any request whose hostname+port
         // matches that origin is handled NetworkOnly — the service worker
         // forwards it to the network and stores nothing.
         //
@@ -50,7 +50,7 @@ export default defineConfig({
             // Match every request to the configured backend API origin.
             // import.meta.env.VITE_API_URL is available at build time via Vite.
             urlPattern: ({ url }) => {
-              const apiOrigin = (typeof VITE_API_URL !== 'undefined' ? VITE_API_URL : 'http://localhost:8000')
+              const apiOrigin = (typeof VITE_API_URL !== 'undefined' ? VITE_API_URL : 'http://localhost:7860')
                 .replace(/\/$/, '');
               try {
                 const apiUrl = new URL(apiOrigin);
@@ -70,7 +70,7 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://localhost:7860',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, '')
       }

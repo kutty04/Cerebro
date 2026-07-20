@@ -169,12 +169,12 @@ Expected output:
 python app.py
 ```
 
-Server runs at http://localhost:8000
+Server runs at http://localhost:7860
 
 Health check:
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:7860/health
 ```
 
 ---
@@ -210,7 +210,7 @@ export default App
 4. Configure API URL in `.env`:
 
 ```
-VITE_API_URL=http://localhost:8000
+VITE_API_URL=http://localhost:7860
 ```
 
 5. Run frontend:
@@ -321,7 +321,7 @@ tail -f indexer.log
 
 - Test search:
 ```bash
-curl -X POST http://localhost:8000/search -H "Content-Type: application/json" -d '{"query":"test"}'
+curl -X POST http://localhost:7860/search -H "Content-Type: application/json" -d '{"query":"test"}'
 ```
 
 ---
@@ -357,14 +357,30 @@ Suggested PR checklist:
 
 ---
 
-## License
+## CORS configuration
 
-MIT — see LICENSE file.
+`CORS_ALLOWED_ORIGINS` is **required in production**. Set it to the exact frontend origin.
+
+```bash
+# Existing production frontend
+CORS_ALLOWED_ORIGINS=https://cerebro-delta-silk.vercel.app
+
+# To also allow a specific Vercel preview URL (after review):
+CORS_ALLOWED_ORIGINS=https://cerebro-delta-silk.vercel.app,https://cerebro-git-branch-name.vercel.app
+```
+
+Rules enforced by the server:
+- Wildcard `*` is never permitted.
+- HTTPS is required for all non-localhost origins.
+- Path segments (e.g. `/app`) are not allowed.
+- Each Vercel preview URL must be explicitly and individually listed.
+- The broad `*.vercel.app` wildcard pattern is rejected.
+
+In **production mode** (`PRODUCTION=true`), the server will **refuse to start**
+if `CORS_ALLOWED_ORIGINS` is missing, empty, or contains only invalid values.
 
 ---
 
-If you'd like, I can:
-- Commit this README.md directly to the `main` branch, or
-- Open a PR with the change.
+## License
 
-Which would you prefer?
+MIT — see LICENSE file.
