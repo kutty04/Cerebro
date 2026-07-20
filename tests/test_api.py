@@ -547,3 +547,127 @@ def test_no_pytest_contamination_in_production_sources():
         "Production source files contain test-infrastructure code:\n"
         + "\n".join(f"  - {v}" for v in violations)
     )
+
+
+# ----------------------------------------------------------------------
+# CORS CONFIGURATION TESTS
+# Tests for parse_cors_origins() and CORS middleware behaviour.
+# ----------------------------------------------------------------------
+
+from app import parse_cors_origins
+
+
+def test_cors_allows_production_vercel_origin():
+    """The real Vercel production origin must pass validation."""
+    origins = parse_cors_origins("https://cerebro-delta-silk.vercel.app")
+    assert "https://cerebro-delta-silk.vercel.app" in origins
+
+
+def test_cors_allows_localhost_origins():
+    """Local development origins must pass validation."""
+    origins = parse_cors_origins("http://localhost:5173,http://localhost:3000")
+    assert "http://localhost:5173" in origins
+    assert "http://localhost:3000" in origins
+
+
+def test_cors_rejects_unknown_origin():
+    """An unrelated HTTPS origin must be parsed but not auto-permitted.
+    The test validates parse_cors_origins does not silently add unknown
+    origins — only origins explicitly listed are accepted."""
+    origins = parse_cors_origins("https://cerebro-delta-silk.vercel.app")
+    assert "https://attacker.example.com" not in origins
+
+
+def test_cors_rejects_wildcard():
+    """Wildcard '*' must be rejected by parse_cors_origins."""
+    origins = parse_cors_origins("*")
+    assert "*" not in origins
+    assert len(origins) == 0
+
+
+def test_cors_rejects_wildcard_mixed_with_valid():
+    """Wildcard mixed into a list must be stripped; valid origins survive."""
+    origins = parse_cors_origins("https://cerebro-delta-silk.vercel.app,*,http://localhost:5173")
+    assert "*" not in origins
+    assert "https://cerebro-delta-silk.vercel.app" in origins
+    assert "http://localhost:5173" in origins
+
+
+def test_cors_rejects_http_non_localhost():
+    """HTTP (non-HTTPS) for non-localhost hosts must be rejected."""
+    origins = parse_cors_origins("http://cerebro-delta-silk.vercel.app")
+    assert len(origins) == 0
+
+
+def test_cors_rejects_origin_with_path_segment():
+    """Origins containing path segments must be rejected."""
+    origins = parse_cors_origins("https://cerebro-delta-silk.vercel.app/app")
+    assert len(origins) == 0
+
+
+def test_cors_rejects_origin_with_embedded_credentials():
+    """Origins with user:pass credentials must be rejected."""
+    origins = parse_cors_origins("https://user:pass@cerebro-delta-silk.vercel.app")
+    assert len(origins) == 0
+
+
+def test_cors_rejects_wildcard_subdomain():
+    """Wildcard sub-domain patterns must be rejected."""
+    origins = parse_cors_origins("https://*.vercel.app")
+    assert len(origins) == 0
+
+
+def test_cors_rejects_malformed_origin():
+    """Strings that are not valid URLs must be skipped."""
+    origins = parse_cors_origins("not-a-url,ftp://bad-scheme.com")
+    assert len(origins) == 0
+
+
+def test_cors_deduplicates_identical_origins():
+    """Duplicate origins in the list must appear only once."""
+    origins = parse_cors_origins(
+        "https://cerebro-delta-silk.vercel.app,https://cerebro-delta-silk.vercel.app"
+    )
+    assert origins.count("https://cerebro-delta-silk.vercel.app") == 1
+
+
+def test_cors_preflight_headers_present(client):
+    """CORS middleware must expose Authorization and Content-Type for preflight."""
+    response = client.options(
+        "/search",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "Authorization, Content-Type",
+        },
+    )
+    # FastAPI CORSMiddleware returns 200 for allowed preflight
+    assert response.status_code == 200
+    acao = response.headers.get("access-control-allow-origin", "")
+    assert acao != "*", "Wildcard CORS must never be returned with credentials"
+    acah = response.headers.get("access-control-allow-headers", "")
+    assert "authorization" in acah.lower() or "content-type" in acah.lower()
+
+
+def test_cors_no_wildcard_with_credentials():
+    """validate_startup_config must reject CORS_ALLOWED_ORIGINS containing '*'."""
+    from app import validate_startup_config
+    with patch.dict(os.environ, {
+        "SUPABASE_URL": "https://example.supabase.co",
+        "SUPABASE_SERVICE_ROLE_KEY": "valid-key-abc123",
+        "HF_TOKEN": "valid-hf-token-abc",
+        "CORS_ALLOWED_ORIGINS": "*",
+    }):
+        assert validate_startup_config() is False
+
+
+def test_cors_validates_startup_wildcard_rejection():
+    """validate_startup_config must reject even partially wildcarded lists."""
+    from app import validate_startup_config
+    with patch.dict(os.environ, {
+        "SUPABASE_URL": "https://example.supabase.co",
+        "SUPABASE_SERVICE_ROLE_KEY": "valid-key-abc123",
+        "HF_TOKEN": "valid-hf-token-abc",
+        "CORS_ALLOWED_ORIGINS": "https://cerebro-delta-silk.vercel.app,*",
+    }):
+        assert validate_startup_config() is False

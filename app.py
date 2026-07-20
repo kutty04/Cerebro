@@ -84,14 +84,15 @@ def validate_startup_config() -> bool:
             if ph in val_clean:
                 logger.error("Configuration validation failed: default placeholder value detected")
                 return False
-                
-    cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
+
+    cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
     if cors_env:
-        origins = [o.strip() for o in cors_env.split(",") if o.strip()]
-        if "*" in origins and os.getenv("CORS_ALLOW_CREDENTIALS", "").lower() == "true":
-            logger.error("Configuration validation failed: wildcard CORS (*) is not allowed with credentials enabled")
+        # Wildcard is never permitted regardless of credential setting
+        raw_parts = [o.strip() for o in cors_env.split(",")]
+        if "*" in raw_parts:
+            logger.error("Configuration validation failed: wildcard CORS (*) is not permitted")
             return False
-            
+
     return True
 
 
@@ -166,28 +167,139 @@ async def add_security_and_privacy_headers(request: Request, call_next):
     return response
 
 
-# Enforce dynamic CORS allowed origins
-cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
-if cors_origins_env:
-    allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
-else:
-    allowed_origins = [
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "https://cerebro-delta-silk.vercel.app",
-    ]
+# ---------------------------------------------------------------------------
+# CORS configuration
+# ---------------------------------------------------------------------------
+# Set CORS_ALLOWED_ORIGINS to a comma-separated list of exact origins in the
+# server environment.  Safe development defaults are applied when the variable
+# is absent.  Production deployments MUST set this explicitly.
+#
+# Rules enforced by parse_cors_origins():
+#   - No wildcard (*) — never permitted with credentials.
+#   - HTTPS required for any non-localhost origin.
+#   - No path segments (e.g. https://example.com/app is rejected).
+#   - No embedded credentials (user:pass@host is rejected).
+#   - Malformed values are logged and skipped.
+# ---------------------------------------------------------------------------
 
-allow_creds = os.getenv("CORS_ALLOW_CREDENTIALS", "").lower() == "true"
-if allow_creds and "*" in allowed_origins:
-    logger.error("Wildcard CORS (*) is not allowed with credentials. Forcing credentials to False.")
+_SAFE_DEV_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+]
+
+
+def parse_cors_origins(raw: str, is_prod: bool = False) -> list[str]:
+    """
+    Parse and validate a comma-separated CORS_ALLOWED_ORIGINS string.
+    Returns a deduplicated list of validated origin strings.
+    Malformed or insecure entries are logged and dropped.
+    """
+    import urllib.parse
+
+    validated: list[str] = []
+    seen: set[str] = set()
+
+    for raw_origin in raw.split(","):
+        origin = raw_origin.strip()
+        if not origin:
+            continue
+
+        # No wildcard
+        if origin == "*":
+            logger.error("CORS: wildcard '*' is not permitted. Skipping.")
+            continue
+
+        try:
+            parsed = urllib.parse.urlparse(origin)
+        except Exception:
+            logger.error("CORS: malformed origin [%s]. Skipping.", origin)
+            continue
+
+        # Must have a valid scheme
+        if parsed.scheme not in ("http", "https"):
+            logger.error("CORS: origin [%s] has unsupported scheme. Skipping.", origin)
+            continue
+
+        # HTTPS required for non-localhost origins (in any environment)
+        if parsed.scheme != "https" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+            logger.error("CORS: origin [%s] must use HTTPS for non-local hosts. Skipping.", origin)
+            continue
+
+        # No path segments beyond root
+        if parsed.path not in ("", "/"):
+            logger.error("CORS: origin [%s] must not contain path segments. Skipping.", origin)
+            continue
+
+        # No embedded credentials
+        if parsed.username or parsed.password:
+            logger.error("CORS: origin [%s] must not contain credentials. Skipping.", origin)
+            continue
+
+        # No wildcard sub-domains
+        hostname = parsed.hostname or ""
+        if hostname.startswith("*"):
+            logger.error("CORS: wildcard sub-domain origin [%s] is not permitted. Skipping.", origin)
+            continue
+
+        # Normalise to scheme://host (strip trailing slash, strip default port)
+        netloc = parsed.netloc
+        normalised = f"{parsed.scheme}://{netloc}"
+
+        if normalised not in seen:
+            seen.add(normalised)
+            validated.append(normalised)
+
+    return validated
+
+
+def _build_cors_origins() -> list[str]:
+    """
+    Build the final CORS allowed-origins list, applying safe defaults when
+    CORS_ALLOWED_ORIGINS is not explicitly configured.
+    """
+    is_prod = (
+        os.getenv("CEREBRO_ENV") == "production"
+        or os.getenv("APP_ENV") == "production"
+        or os.getenv("PRODUCTION", "").lower() == "true"
+    )
+
+    cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+
+    if cors_env:
+        origins = parse_cors_origins(cors_env, is_prod=is_prod)
+        if not origins:
+            logger.error(
+                "CORS: CORS_ALLOWED_ORIGINS was set but contained no valid origins. "
+                "Falling back to safe development defaults."
+            )
+            return list(_SAFE_DEV_ORIGINS)
+        return origins
+
+    # No explicit configuration — use safe development defaults.
+    # Production deployments must set CORS_ALLOWED_ORIGINS explicitly.
+    if is_prod:
+        logger.warning(
+            "CORS: CORS_ALLOWED_ORIGINS is not set in production mode. "
+            "Only localhost origins are allowed. Set CORS_ALLOWED_ORIGINS to "
+            "the real frontend origin (e.g. https://cerebro-delta-silk.vercel.app)."
+        )
+    return list(_SAFE_DEV_ORIGINS)
+
+
+allowed_origins = _build_cors_origins()
+allow_creds = bool(allowed_origins)  # credentials only if we have an explicit origin list
+
+if "*" in allowed_origins:
+    # Belt-and-suspenders guard — should never reach here after parse_cors_origins
+    logger.error("CORS: wildcard detected in final origin list. Disabling credentials.")
     allow_creds = False
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=allow_creds,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 

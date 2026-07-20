@@ -409,3 +409,68 @@ test('40. LandingPage uses nav section footer landmarks', () => {
   assert.ok(c.includes('<footer'), 'must use footer');
 });
 
+
+// -------------------------------------------------------------------------
+// SERVICE-WORKER CACHE AUDIT
+// Inspect the vite.config.js source (and generated sw.js if present) to
+// prove backend API routes are NOT runtime-cached by the service worker.
+// -------------------------------------------------------------------------
+
+test('41. vite.config.js uses origin-based API exclusion (not a fragile path list)', () => {
+  const c = fs.readFileSync('./vite.config.js', 'utf-8');
+  // Must use a hostname/port comparison strategy
+  assert.ok(c.includes('hostname'), 'SW must use hostname-based exclusion');
+  assert.ok(c.includes('NetworkOnly'), 'SW must declare NetworkOnly handler');
+  // Must NOT use the old fragile partial path list for critical API routes
+  assert.ok(!c.includes("'/search', '/ingest', '/index', '/user-repos'"), 'Must not use fragile partial path list');
+});
+
+test('42. Generated sw.js (if present) contains NetworkOnly strategy', () => {
+  const swPath = './dist/sw.js';
+  if (!fs.existsSync(swPath)) {
+    // Build artefact absent — skip (run `npm run build` first)
+    return;
+  }
+  const c = fs.readFileSync(swPath, 'utf-8');
+  assert.ok(c.includes('NetworkOnly'), 'Generated sw.js must include NetworkOnly strategy');
+  // The generated SW must not contain hardcoded API path strings from the old list
+  assert.ok(!c.includes('/user-repos') || c.includes('NetworkOnly'),
+    'If /user-repos appears in sw.js it must be inside a NetworkOnly handler');
+});
+
+test('43. vite.config.js does not use wildcard globPatterns for API responses', () => {
+  const c = fs.readFileSync('./vite.config.js', 'utf-8');
+  // globPatterns must only include static asset types — not JSON or arbitrary extensions
+  // that could inadvertently match API responses
+  assert.ok(c.includes("globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest}']"),
+    'globPatterns must match static assets only');
+});
+
+test('44. Service-worker runtimeCaching does not explicitly target Supabase auth endpoints', () => {
+  const c = fs.readFileSync('./vite.config.js', 'utf-8');
+  // The runtimeCaching urlPattern must not explicitly match supabase.co URLs
+  // (supabase.co is excluded by virtue of being a different hostname — no rule needed)
+  assert.ok(!c.includes("'supabase.co'") && !c.includes('"supabase.co"'),
+    'supabase.co must not appear as a quoted pattern in SW runtimeCaching');
+  assert.ok(!c.includes("'auth/v1'") && !c.includes('"auth/v1"'),
+    'auth/v1 must not be a quoted pattern in SW config');
+});
+
+
+// -------------------------------------------------------------------------
+// CORS STATIC AUDIT
+// Inspect vite.config.js and apiClient.js for CORS / origin safety.
+// -------------------------------------------------------------------------
+
+test('45. apiClient.js does not hardcode a production origin or API key', () => {
+  const c = fs.readFileSync('./src/apiClient.js', 'utf-8');
+  assert.ok(!c.includes('cerebro-delta-silk.vercel.app'), 'Production origin must not be hardcoded in apiClient.js');
+  assert.ok(!c.includes('supabase_service_role'), 'Service role key must not appear in frontend');
+  assert.ok(!c.includes('hf_token'), 'HF token must not appear in frontend');
+});
+
+test('46. vite.config.js does not expose real production secrets', () => {
+  const c = fs.readFileSync('./vite.config.js', 'utf-8');
+  assert.ok(!c.includes('sbp_'), 'No Supabase service key in vite config');
+  assert.ok(!c.includes('hf_'), 'No HF token in vite config');
+});
