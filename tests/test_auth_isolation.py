@@ -276,3 +276,51 @@ def test_rls_migration_sql_static_review():
     assert "SECURITY INVOKER" in sql
     assert "CREATE TABLE IF NOT EXISTS user_repositories" in sql
     assert "CREATE TABLE IF NOT EXISTS user_conversations" in sql
+
+
+# ----------------------------------------------------------------------
+# 7. DATABASE READ/WRITE OWNERSHIP AUDIT TESTS
+# ----------------------------------------------------------------------
+
+@patch("app.db")
+@patch("app.get_embedding")
+def test_malicious_insert_scoping_overwritten(mock_get_embedding, mock_db, client):
+    """
+    Proves that any database insert on /index strictly binds the row to the authenticated user ID
+    from the token, and ignores or overwrites any user_id field.
+    """
+    mock_get_embedding.return_value = [0.1] * 384
+    mock_table = MagicMock()
+    mock_table.insert.return_value = mock_table
+    mock_table.execute.return_value = MagicMock(data=[{"id": 42}])
+    mock_db.table.return_value = mock_table
+
+    payload = {
+        "repo_name": "malicious-repo",
+        "file_path": "hacked.py",
+        "language": "python",
+        "code_content": "import os",
+        "user_id": "user-A-id"
+    }
+
+    res = client.post("/index", json=payload, headers=USER_A_HEADERS)
+    assert res.status_code == 200
+
+    # Ensure the database write payload strictly uses 'user-A-id'
+    called_data = mock_table.insert.call_args[0][0]
+    assert called_data["user_id"] == "user-A-id"
+
+
+@patch("app.db")
+def test_malicious_cross_user_id_rejected(mock_db, client):
+    payload = {
+        "repo_name": "repo-X",
+        "file_path": "main.py",
+        "language": "python",
+        "code_content": "def run(): pass",
+        "user_id": "user-B-id"
+    }
+    res = client.post("/index", json=payload, headers=USER_A_HEADERS)
+    assert res.status_code == 403
+    assert "user identity mismatch" in res.json()["detail"]
+

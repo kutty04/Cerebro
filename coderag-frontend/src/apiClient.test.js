@@ -1,5 +1,7 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { apiFetch, setSupabaseInstance } from './apiClient.js';
 
 let sessionMock = null;
@@ -139,3 +141,65 @@ test('8. Missing session executes safely without header', async () => {
   await apiFetch('/user-repos');
   assert.equal(lastFetchHeaders['Authorization'], undefined);
 });
+
+test('9. Static raw-fetch audit on components', () => {
+  const componentsDir = './src/components';
+  if (!fs.existsSync(componentsDir)) return;
+
+  const files = fs.readdirSync(componentsDir);
+  const protectedEndpoints = [
+    '/search', '/ingest', '/index', '/user-repos', '/delete-repo', '/graph-data', '/history', '/analytics'
+  ];
+
+  for (const file of files) {
+    if (file.endsWith('.jsx') || file.endsWith('.js')) {
+      const content = fs.readFileSync(path.join(componentsDir, file), 'utf-8');
+      
+      // Ensure no raw 'fetch(' call is present
+      assert.ok(!content.includes('fetch('), `Raw fetch() call detected in production component: ${file}. Use apiFetch instead.`);
+      
+      // Ensure protected endpoints are not accessed via raw fetch
+      for (const endpoint of protectedEndpoints) {
+        if (content.includes(endpoint)) {
+          assert.ok(content.includes('apiFetch'), `Endpoint ${endpoint} found in ${file} without apiFetch!`);
+        }
+      }
+    }
+  }
+});
+
+test('10. Service function search invokes authenticated API client', async () => {
+  sessionMock = { access_token: 'auth-token-123' };
+  fetchResponseStatus = 200;
+  await apiFetch('/search', { method: 'POST', body: JSON.stringify({ query: 'test' }) });
+  assert.equal(lastFetchHeaders['Authorization'], 'Bearer auth-token-123');
+});
+
+test('11. Service function ingest invokes authenticated API client', async () => {
+  sessionMock = { access_token: 'auth-token-123' };
+  fetchResponseStatus = 200;
+  await apiFetch('/ingest', { method: 'POST', body: JSON.stringify({ repo_url: 'https://github.com/a/b' }) });
+  assert.equal(lastFetchHeaders['Authorization'], 'Bearer auth-token-123');
+});
+
+test('12. Service function repository list invokes authenticated API client', async () => {
+  sessionMock = { access_token: 'auth-token-123' };
+  fetchResponseStatus = 200;
+  await apiFetch('/user-repos');
+  assert.equal(lastFetchHeaders['Authorization'], 'Bearer auth-token-123');
+});
+
+test('13. Service function graph invokes authenticated API client', async () => {
+  sessionMock = { access_token: 'auth-token-123' };
+  fetchResponseStatus = 200;
+  await apiFetch('/graph-data');
+  assert.equal(lastFetchHeaders['Authorization'], 'Bearer auth-token-123');
+});
+
+test('14. Service function delete repository invokes authenticated API client', async () => {
+  sessionMock = { access_token: 'auth-token-123' };
+  fetchResponseStatus = 200;
+  await apiFetch('/delete-repo?repo_name=test', { method: 'POST' });
+  assert.equal(lastFetchHeaders['Authorization'], 'Bearer auth-token-123');
+});
+
