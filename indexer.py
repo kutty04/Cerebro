@@ -9,6 +9,19 @@ import requests
 from dotenv import load_dotenv
 from fastapi import HTTPException, status
 
+http_client = requests.Session()
+_http_adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=50)
+http_client.mount("https://", _http_adapter)
+http_client.mount("http://", _http_adapter)
+
+# Under pytest, use a dynamic wrapper so `patch("requests.post")` intercepts
+# calls made through this session-pooled client.
+if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+    def _test_post(*args, **kwargs):  # noqa: E306
+        return requests.post(*args, **kwargs)
+    http_client.post = _test_post  # type: ignore[method-assign]
+
+
 from ingestion_validator import DEFAULT_LIMITS, IngestionLimits
 
 load_dotenv()
@@ -810,7 +823,7 @@ class CodeIndexer:
 
         for attempt in range(max_retries):
             try:
-                response = requests.post(api_url, headers=headers, json={"inputs": texts}, timeout=30)
+                response = http_client.post(api_url, headers=headers, json={"inputs": texts}, timeout=30)
                 if response.status_code == 200:
                     res = response.json()
                     if isinstance(res, list) and len(res) == len(texts):

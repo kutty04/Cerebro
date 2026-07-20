@@ -11,6 +11,27 @@ DB_PATH = "coderag_telemetry.db"
 logger = logging.getLogger(__name__)
 
 
+def prune_old_telemetry_conn(conn: sqlite3.Connection):
+    """Prunes old telemetry data using an active connection."""
+    try:
+        # 1. Prune cache older than 1 day
+        conn.execute("DELETE FROM query_cache WHERE timestamp < datetime('now', '-1 day')")
+        # 2. Prune search logs older than 30 days
+        conn.execute("DELETE FROM search_logs WHERE timestamp < datetime('now', '-30 days')")
+        # 3. Prune chat messages older than 30 days
+        conn.execute("DELETE FROM chat_messages WHERE timestamp < datetime('now', '-30 days')")
+        # 4. Prune conversations older than 30 days based on updated_at
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM conversations WHERE updated_at < datetime('now', '-30 days')")
+        old_conv_ids = [row[0] for row in cursor.fetchall()]
+        if old_conv_ids:
+            placeholders = ",".join("?" * len(old_conv_ids))
+            conn.execute(f"DELETE FROM chat_messages WHERE conversation_id IN ({placeholders})", old_conv_ids)
+            conn.execute(f"DELETE FROM conversations WHERE id IN ({placeholders})", old_conv_ids)
+    except Exception as e:
+        logger.error("Telemetry pruning connection failed [op=prune_conn, exc_type=%s]", type(e).__name__)
+
+
 def init_db():
     """
     Initializes SQLite telemetry DB and safely performs idempotent schema migrations
@@ -102,12 +123,16 @@ def init_db():
             else:
                 conn.execute("UPDATE schema_version SET version = 1")
 
+            # Prune old telemetry on database initialization
+            prune_old_telemetry_conn(conn)
+
     except Exception as e:
         logger.error("Telemetry database init failed [op=init_db, exc_type=%s]", type(e).__name__)
 
 
 # Auto-initialize database on module import
 init_db()
+
 
 
 def get_cache_key(
@@ -454,3 +479,40 @@ def get_chat_history(user_id: str) -> List[Dict]:
     except Exception as e:
         logger.error("Telemetry history fetch failed [op=get_chat_history, exc_type=%s]", type(e).__name__)
         return []
+
+
+
+def prune_old_telemetry():
+    """Exposes pruning of telemetry database entries externally using a new connection."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            prune_old_telemetry_conn(conn)
+    except Exception as e:
+        logger.error("Telemetry pruning failed [op=prune_old_telemetry, exc_type=%s]", type(e).__name__)
+
+
+def delete_user_repo_telemetry(user_id: str, repo_filter: str):
+    """
+    Deletes all local telemetry data (cache, conversations, chat messages, search logs)
+    associated with a specific user and repository filter.
+    """
+    if not user_id or not repo_filter:
+        return
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            # 1. Delete matching search logs
+            conn.execute("DELETE FROM search_logs WHERE user_id = ? AND repo_filter = ?", (user_id, repo_filter))
+            # 2. Delete conversations and their chat messages
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM conversations WHERE user_id = ? AND repo_filter = ?", (user_id, repo_filter))
+            conv_ids = [row[0] for row in cursor.fetchall()]
+            if conv_ids:
+                placeholders = ",".join("?" * len(conv_ids))
+                conn.execute(f"DELETE FROM chat_messages WHERE conversation_id IN ({placeholders}) AND user_id = ?", (*conv_ids, user_id))
+                conn.execute(f"DELETE FROM conversations WHERE id IN ({placeholders}) AND user_id = ?", (*conv_ids, user_id))
+            # 3. Purge cache
+            conn.execute("DELETE FROM query_cache WHERE user_id = ? AND repo_filter = ?", (user_id, repo_filter))
+            logger.info("Successfully purged telemetry data for user and repo [op=telemetry_purge]")
+    except Exception as e:
+        logger.error("Telemetry user repo purge failed [op=telemetry_purge, exc_type=%s]", type(e).__name__)
+

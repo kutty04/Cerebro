@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import supabase
 import os
+import sys
 import json
 import re
 import subprocess
@@ -29,6 +30,7 @@ from telemetry import (
     verify_and_get_conversation,
     add_message_to_conversation,
     get_conversation_messages,
+    delete_user_repo_telemetry,
 )
 from ingestion_validator import (
     DEFAULT_LIMITS,
@@ -44,14 +46,81 @@ from security.auth import AuthenticatedUser, get_current_user, verify_identity_m
 load_dotenv(override=True)
 
 db = None
+http_client = requests.Session()
+_http_adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=50)
+http_client.mount("https://", _http_adapter)
+http_client.mount("http://", _http_adapter)
+
+# Under pytest, redirect the session's post() through a dynamic wrapper so that
+# `patch("requests.post")` in the test suite intercepts all calls made through
+# the connection-pooled client without changing production behaviour.
+# A direct bind (http_client.post = requests.post) captures the original
+# function object once and is immune to later patching, so we use a wrapper
+# that looks up requests.post at call time instead.
+if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+    def _test_post(*args, **kwargs):  # noqa: E306
+        return requests.post(*args, **kwargs)
+    http_client.post = _test_post  # type: ignore[method-assign]
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def validate_startup_config() -> bool:
+    """
+    Checks that all required backend configuration variables are set
+    and do not contain default template placeholder values.
+    """
+    placeholders = [
+        "your_supabase_project_url_here",
+        "your_supabase_anon_key_here",
+        "your_huggingface_api_token_here",
+        "test-placeholder"
+    ]
+    
+    url = os.getenv("SUPABASE_URL")
+    service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    legacy_key = os.getenv("SUPABASE_KEY")
+    hf_token = os.getenv("HF_TOKEN")
+    
+    key = service_role_key or legacy_key
+    
+    if not url or not key or not hf_token:
+        logger.error("Configuration validation failed: missing SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY or HF_TOKEN")
+        return False
+        
+    for val in [url, key, hf_token]:
+        val_clean = val.strip().lower()
+        for ph in placeholders:
+            if ph in val_clean:
+                logger.error("Configuration validation failed: default placeholder value detected")
+                return False
+                
+    cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
+    if cors_env:
+        origins = [o.strip() for o in cors_env.split(",") if o.strip()]
+        if "*" in origins and os.getenv("CORS_ALLOW_CREDENTIALS", "").lower() == "true":
+            logger.error("Configuration validation failed: wildcard CORS (*) is not allowed with credentials enabled")
+            return False
+            
+    return True
 
 
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
     global db
     logger.info("🚀 Starting CodeRAG API initialization...")
+    
+    config_valid = validate_startup_config()
+    is_prod = (
+        os.getenv("CEREBRO_ENV") == "production"
+        or os.getenv("APP_ENV") == "production"
+        or os.getenv("PRODUCTION", "").lower() == "true"
+    )
+    if is_prod and not config_valid:
+        logger.critical("❌ CRITICAL: Configuration invalid or missing in production mode!")
+        raise RuntimeError("Configuration error: Required server variables (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, HF_TOKEN) are missing or unconfigured in production.")
+        
     try:
         init_db()
         logger.info("✅ Telemetry DB initialized")
@@ -83,14 +152,51 @@ async def lifespan(app_instance: FastAPI):
 
 app = FastAPI(title="CodeRAG API", version="1.0.0", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+
+@app.middleware("http")
+async def add_security_and_privacy_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Permissions-Policy"] = (
+        "accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
+        "magnetometer=(), microphone=(), payment=(), usb=()"
+    )
+    
+    # Sensitive API responses must never be cached
+    sensitive_prefixes = (
+        "/search", "/analytics", "/history", "/user-repos",
+        "/graph-data", "/ingest", "/index", "/delete-repo",
+        "/readiness"
+    )
+    if request.url.path.startswith(sensitive_prefixes):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+        response.headers["Pragma"] = "no-cache"
+        
+    return response
+
+
+# Enforce dynamic CORS allowed origins
+cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
+if cors_origins_env:
+    allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+else:
+    allowed_origins = [
         "http://localhost:5173",
         "http://localhost:3000",
         "https://cerebro-delta-silk.vercel.app",
-    ],
-    allow_credentials=False,
+    ]
+
+allow_creds = os.getenv("CORS_ALLOW_CREDENTIALS", "").lower() == "true"
+if allow_creds and "*" in allowed_origins:
+    logger.error("Wildcard CORS (*) is not allowed with credentials. Forcing credentials to False.")
+    allow_creds = False
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=allow_creds,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -174,7 +280,7 @@ def get_embedding(text: str) -> Optional[List[float]]:
     headers = {"Authorization": f"Bearer {hf_token.strip()}"}
 
     try:
-        response = requests.post(api_url, headers=headers, json={"inputs": [text]}, timeout=15)
+        response = http_client.post(api_url, headers=headers, json={"inputs": [text]}, timeout=15)
         if response.status_code == 200:
             res = response.json()
             if isinstance(res, list) and len(res) > 0 and isinstance(res[0], list):
@@ -210,7 +316,14 @@ async def readiness_check(response: Response):
     is_hf_ready = os.getenv("HF_TOKEN") is not None
     is_db_ready = db is not None
 
-    if is_db_ready and is_hf_ready:
+    is_prod = (
+        os.getenv("CEREBRO_ENV") == "production"
+        or os.getenv("APP_ENV") == "production"
+        or os.getenv("PRODUCTION", "").lower() == "true"
+    )
+    config_ok = validate_startup_config()
+
+    if is_db_ready and is_hf_ready and (not is_prod or config_ok):
         response.status_code = status.HTTP_200_OK
         return {
             "status": "ready",
@@ -601,7 +714,7 @@ Your response must be a valid JSON object matching the following structure:
     # Retry logic (maximum 1 retry) for genuinely transient failures only
     for attempt in range(2):
         try:
-            res = requests.post(url, headers=headers, json=payload, timeout=15)
+            res = http_client.post(url, headers=headers, json=payload, timeout=15)
             if res.status_code == 200:
                 res_text = res.json()["choices"][0]["message"]["content"]
                 break
@@ -1011,7 +1124,7 @@ async def delete_repo(
     try:
         repo = DatabaseAdapter.get_repo_by_name(db, target_user_id, repo_name)
         DatabaseAdapter.delete_owned_repo(db, target_user_id, repo["id"])
-        invalidate_user_repo_cache(target_user_id, repo_name)
+        delete_user_repo_telemetry(target_user_id, repo_name)
         return {"status": "success", "message": f"Repository {repo_name} deleted"}
     except Exception as e:
         logger.error("Failed to delete repo [op=delete_repo, exc_type=%s]", type(e).__name__)
