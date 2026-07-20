@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query, status, Response, Depends
+from fastapi import FastAPI, HTTPException, Query, status, Response, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import supabase
@@ -19,12 +19,15 @@ from indexer import CodeIndexer
 from telemetry import (
     init_db,
     log_search,
-    save_chat,
     get_analytics,
     get_chat_history,
     get_cached_query,
     set_cached_query,
     invalidate_user_repo_cache,
+    create_conversation,
+    verify_and_get_conversation,
+    add_message_to_conversation,
+    get_conversation_messages,
 )
 from ingestion_validator import (
     DEFAULT_LIMITS,
@@ -39,9 +42,7 @@ from security.auth import AuthenticatedUser, get_current_user, verify_identity_m
 
 load_dotenv(override=True)
 
-# Global variables for database state
 db = None
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -50,15 +51,12 @@ logger = logging.getLogger(__name__)
 async def lifespan(app_instance: FastAPI):
     global db
     logger.info("🚀 Starting CodeRAG API initialization...")
-
-    # 1. Init Telemetry DB
     try:
         init_db()
         logger.info("✅ Telemetry DB initialized")
     except Exception as e:
         logger.error("Telemetry DB initialization failed [op=lifespan_init, exc_type=%s]", type(e).__name__)
 
-    # 2. Init Supabase
     try:
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_KEY")
@@ -75,16 +73,8 @@ async def lifespan(app_instance: FastAPI):
     logger.info("🛑 CodeRAG API shutting down...")
 
 
-# Initialize FastAPI app with lifespan
-try:
-    app = FastAPI(title="CodeRAG API", version="1.0.0", lifespan=lifespan)
-    logger.info("🚀 Starting CodeRAG API...")
-except Exception as e:
-    logger.error("FastAPI initialization failed [op=app_init, exc_type=%s]", type(e).__name__)
-    raise
+app = FastAPI(title="CodeRAG API", version="1.0.0", lifespan=lifespan)
 
-
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -98,11 +88,11 @@ app.add_middleware(
 )
 
 
-# Pydantic models with defensive bounds
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000, description="Natural language code search query")
     top_k: Optional[int] = Field(default=5, ge=1, le=50, description="Number of results to retrieve")
     repo_filter: Optional[str] = Field(default=None, max_length=200, description="Filter by repository name")
+    conversation_id: Optional[str] = Field(default=None, max_length=100, description="Server-assigned conversation UUID")
     history: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Recent conversation turns")
     user_id: Optional[str] = Field(default=None, max_length=200, description="Deprecated user identifier")
 
@@ -125,6 +115,7 @@ class SearchResponse(BaseModel):
     answer: str
     sources: List[Dict[str, Any]] = Field(default_factory=list)
     query: str
+    conversation_id: str
     follow_ups: List[str] = Field(default_factory=list)
     confidence: int = 0
 
@@ -144,7 +135,6 @@ class ReadinessResponse(BaseModel):
     llm: str
 
 
-# Helper function for serverless embeddings
 def get_embedding(text: str) -> Optional[List[float]]:
     hf_token = os.getenv("HF_TOKEN")
     if not hf_token:
@@ -175,7 +165,6 @@ def get_embedding(text: str) -> Optional[List[float]]:
         return None
 
 
-# Unprotected Public Endpoints
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     is_hf_ready = os.getenv("HF_TOKEN") is not None
@@ -211,33 +200,47 @@ async def readiness_check(response: Response):
         }
 
 
-# Protected Endpoint: Search
 @app.post("/search", response_model=SearchResponse)
-async def search(request: SearchRequest, current_user: AuthenticatedUser = Depends(get_current_user)):
-    """
-    Search codebases using vector similarity + LLM generation.
-    Strictly isolated to authenticated current_user.
-    """
+async def search(search_req: SearchRequest, current_user: AuthenticatedUser = Depends(get_current_user)):
     if not db:
         raise HTTPException(status_code=500, detail="Database client is not initialized")
 
-    # Enforce identity matching if client sends legacy user_id
-    verify_identity_match(current_user.id, request.user_id)
+    verify_identity_match(current_user.id, search_req.user_id)
     user_id = current_user.id
 
+    if search_req.conversation_id:
+        conv = verify_and_get_conversation(search_req.conversation_id, user_id)
+        if not conv:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conversation thread not found or inaccessible.",
+            )
+        conv_id = search_req.conversation_id
+    else:
+        conv_id = create_conversation(user_id, search_req.repo_filter)
+
+    top_k = search_req.top_k or 5
     start_time = time.time()
 
-    # Check SQLite Cache (User-scoped SHA-256 cache lookup)
     try:
-        cached = get_cached_query(request.query, request.repo_filter, user_id)
+        cached = get_cached_query(
+            query=search_req.query,
+            user_id=user_id,
+            repo_filter=search_req.repo_filter,
+            top_k=top_k,
+            history=search_req.history,
+        )
         if cached:
-            logger.info("🟢 Cache hit! Returning instant response (0 tokens)")
+            logger.info("🟢 Cache hit! Returning instant response")
             latency_ms = (time.time() - start_time) * 1000
-            log_search(request.query, request.repo_filter, cached["confidence"], latency_ms, user_id=user_id)
+            log_search(search_req.query, search_req.repo_filter, cached["confidence"], latency_ms, user_id=user_id)
+            add_message_to_conversation(conv_id, user_id, "user", search_req.query)
+            add_message_to_conversation(conv_id, user_id, "assistant", cached["answer"], cached["sources"])
             return SearchResponse(
                 answer=cached["answer"],
                 sources=cached["sources"],
-                query=request.query,
+                query=search_req.query,
+                conversation_id=conv_id,
                 follow_ups=[
                     "How does this connect to other files?",
                     "Can you explain this in more detail?",
@@ -249,12 +252,10 @@ async def search(request: SearchRequest, current_user: AuthenticatedUser = Depen
         logger.warning("Cache check failed silently [op=cache_check, exc_type=%s]", type(cache_err).__name__)
 
     try:
-        # Step 1: Embed Query (Serverless)
-        query_embedding = get_embedding(request.query)
+        query_embedding = get_embedding(search_req.query)
         if not query_embedding:
             raise HTTPException(status_code=502, detail="Embedding service unavailable")
 
-        # Step 2: Search pgvector (Semantic RPC strictly scoped by verified user_id)
         logger.info("📚 Searching vector database...")
         vector_results_data = []
 
@@ -263,12 +264,12 @@ async def search(request: SearchRequest, current_user: AuthenticatedUser = Depen
                 "search_code_snippets",
                 {
                     "query_embedding": query_embedding,
-                    "match_count": request.top_k,
+                    "match_count": top_k,
                     "p_user_id": user_id,
                 },
             )
-            if request.repo_filter:
-                search_rpc = search_rpc.eq("repo_name", request.repo_filter)
+            if search_req.repo_filter:
+                search_rpc = search_rpc.eq("repo_name", search_req.repo_filter)
             res = search_rpc.execute()
             vector_results_data = res.data or []
         except Exception as rpc_e:
@@ -278,7 +279,6 @@ async def search(request: SearchRequest, current_user: AuthenticatedUser = Depen
                 detail="Search service error: user isolation query could not be executed safely.",
             )
 
-        # Step 2.5: Keyword Search (Exact Match Fallback - strictly user-scoped)
         stop_words = {
             "how", "do", "did", "i", "we", "you", "what", "is", "where", "can",
             "find", "the", "a", "an", "to", "for", "in", "of", "and", "or", "my",
@@ -286,7 +286,7 @@ async def search(request: SearchRequest, current_user: AuthenticatedUser = Depen
             "show", "tell", "give", "me", "get", "please", "about"
         }
         keywords = [
-            word for word in re.findall(r"\b\w+\b", request.query.lower())
+            word for word in re.findall(r"\b\w+\b", search_req.query.lower())
             if word not in stop_words and len(word) > 2
         ]
         keywords.sort(key=len, reverse=True)
@@ -300,17 +300,16 @@ async def search(request: SearchRequest, current_user: AuthenticatedUser = Depen
                         "id, repo_name, file_path, language, code_content, source_url"
                     ).eq("user_id", user_id)
 
-                    if request.repo_filter:
-                        kw_search = kw_search.eq("repo_name", request.repo_filter)
+                    if search_req.repo_filter:
+                        kw_search = kw_search.eq("repo_name", search_req.repo_filter)
 
                     kw_search = kw_search.ilike("code_content", f"%{kw}%")
-                    kw_res = kw_search.limit(request.top_k).execute()
+                    kw_res = kw_search.limit(top_k).execute()
                     if kw_res.data:
                         keyword_results.extend(kw_res.data)
                 except Exception as kw_e:
                     logger.warning("Keyword search failed [op=keyword_search, exc_type=%s]", type(kw_e).__name__)
 
-        # Merge and deduplicate
         merged_data = []
         seen_ids = set()
 
@@ -324,18 +323,18 @@ async def search(request: SearchRequest, current_user: AuthenticatedUser = Depen
                 merged_data.append(row)
                 seen_ids.add(row.get("id"))
 
-        final_results = merged_data[: request.top_k * 2]
+        final_results = merged_data[: top_k * 2]
 
         if not final_results:
             return SearchResponse(
                 answer="No matching code snippets found in the indexed codebase. Try broadening your query or selecting 'All Projects'.",
                 sources=[],
-                query=request.query,
+                query=search_req.query,
+                conversation_id=conv_id,
                 follow_ups=[],
                 confidence=0,
             )
 
-        # Calculate Confidence Score
         max_sim = 0.0
         if vector_results_data:
             max_sim = max([float(row.get("similarity", 0)) for row in vector_results_data], default=0.0)
@@ -348,9 +347,6 @@ async def search(request: SearchRequest, current_user: AuthenticatedUser = Depen
         if confidence < 30 and len(final_results) > 0:
             confidence = 50
 
-        logger.info(f"✅ Found {len(final_results)} matching snippets (Hybrid) - Confidence: {confidence}%")
-
-        # Step 3: Build context from results
         context_parts = []
         sources = []
 
@@ -372,9 +368,6 @@ async def search(request: SearchRequest, current_user: AuthenticatedUser = Depen
 
         context = "\n\n".join(context_parts)
 
-        # Step 4: Generate response with LLM
-        logger.info("🤖 Generating response with LLM...")
-
         system_prompt = f"""You are a master code expert connected to Cerebro AI. Answer the user's question using ONLY the provided code snippets.
 
 CODE CONTEXT:
@@ -393,12 +386,16 @@ FOLLOW_UPS:
 
         messages = [{"role": "system", "content": system_prompt}]
 
-        if request.history:
-            for msg in request.history[-4:]:
+        history_messages = get_conversation_messages(conv_id, user_id, limit=12)
+        if history_messages:
+            for msg in history_messages:
+                messages.append({"role": msg["role"], "content": msg["content"]})
+        elif search_req.history:
+            for msg in search_req.history[-6:]:
                 if isinstance(msg, dict) and "role" in msg and "content" in msg:
                     messages.append({"role": str(msg["role"]), "content": str(msg["content"])})
 
-        messages.append({"role": "user", "content": request.query})
+        messages.append({"role": "user", "content": search_req.query})
 
         hf_env_token = os.getenv("HF_TOKEN")
         current_key = hf_env_token.strip() if hf_env_token else ""
@@ -409,7 +406,8 @@ FOLLOW_UPS:
                 answer="Error: AI Brain (HF_TOKEN) is not configured on the server.",
                 confidence=0,
                 sources=sources,
-                query=request.query,
+                query=search_req.query,
+                conversation_id=conv_id,
             )
 
         url = "https://router.huggingface.co/v1/chat/completions"
@@ -438,7 +436,6 @@ FOLLOW_UPS:
             logger.error("HF Router connection failed [op=chat_completion, exc_type=%s]", type(api_e).__name__)
             final_answer = "Cerebro retrieved relevant snippets, but could not connect to the AI router."
 
-        # Parse out follow-up questions
         answer_text = final_answer.strip()
         follow_ups = []
         if "FOLLOW_UPS:" in answer_text:
@@ -451,19 +448,29 @@ FOLLOW_UPS:
                 if line.startswith("-"):
                     follow_ups.append(line.lstrip("- ").strip())
 
-        # Log analytics and save history strictly for current_user
         latency_ms = (time.time() - start_time) * 1000
         try:
-            log_search(request.query, request.repo_filter, confidence, latency_ms, user_id=user_id)
-            save_chat(user_id, request.query, answer_text, sources, user_id=user_id)
-            set_cached_query(request.query, request.repo_filter, answer_text, sources, confidence, user_id=user_id)
+            log_search(search_req.query, search_req.repo_filter, confidence, latency_ms, user_id=user_id)
+            add_message_to_conversation(conv_id, user_id, "user", search_req.query)
+            add_message_to_conversation(conv_id, user_id, "assistant", answer_text, sources)
+            set_cached_query(
+                query=search_req.query,
+                user_id=user_id,
+                answer=answer_text,
+                sources=sources,
+                confidence=confidence,
+                repo_filter=search_req.repo_filter,
+                top_k=top_k,
+                history=search_req.history,
+            )
         except Exception as log_e:
             logger.warning("Logging failed [op=post_search_logging, exc_type=%s]", type(log_e).__name__)
 
         return SearchResponse(
             answer=answer_text,
             sources=sources,
-            query=request.query,
+            query=search_req.query,
+            conversation_id=conv_id,
             follow_ups=follow_ups[:3],
             confidence=confidence,
         )
@@ -477,7 +484,6 @@ FOLLOW_UPS:
         )
 
 
-# Protected Endpoint: Analytics
 @app.get("/analytics")
 async def fetch_analytics(current_user: AuthenticatedUser = Depends(get_current_user)):
     try:
@@ -487,7 +493,6 @@ async def fetch_analytics(current_user: AuthenticatedUser = Depends(get_current_
         return {"total_searches": 0, "avg_latency_ms": 0.0, "avg_confidence": 0.0, "recent_queries": []}
 
 
-# Protected Endpoint: History
 @app.get("/history")
 async def fetch_history(current_user: AuthenticatedUser = Depends(get_current_user)):
     try:
@@ -497,31 +502,30 @@ async def fetch_history(current_user: AuthenticatedUser = Depends(get_current_us
         return []
 
 
-# Protected Endpoint: Index Snippet
 @app.post("/index")
-async def index_snippet(request: IndexRequest, current_user: AuthenticatedUser = Depends(get_current_user)):
+async def index_snippet(index_req: IndexRequest, current_user: AuthenticatedUser = Depends(get_current_user)):
     if not db:
         raise HTTPException(status_code=500, detail="Database client not initialized")
 
-    verify_identity_match(current_user.id, request.user_id)
+    verify_identity_match(current_user.id, index_req.user_id)
     user_id = current_user.id
 
     try:
-        logger.info(f"📝 Indexing snippet for {request.repo_name}/{request.file_path}")
+        logger.info(f"📝 Indexing snippet for {index_req.repo_name}/{index_req.file_path}")
 
-        embedding = get_embedding(request.code_content)
+        embedding = get_embedding(index_req.code_content)
         if not embedding:
             raise HTTPException(
                 status_code=502, detail="Failed to generate embedding from serverless provider"
             )
 
         data = {
-            "repo_name": request.repo_name,
-            "file_path": request.file_path,
-            "language": request.language,
-            "code_content": request.code_content,
+            "repo_name": index_req.repo_name,
+            "file_path": index_req.file_path,
+            "language": index_req.language,
+            "code_content": index_req.code_content,
             "embedding": embedding,
-            "source_url": request.source_url,
+            "source_url": index_req.source_url,
             "user_id": user_id,
         }
 
@@ -530,8 +534,8 @@ async def index_snippet(request: IndexRequest, current_user: AuthenticatedUser =
         if not result.data:
             raise HTTPException(status_code=500, detail="Database insertion failed")
 
-        invalidate_user_repo_cache(user_id, request.repo_name)
-        logger.info(f"✅ Successfully indexed {request.file_path}")
+        invalidate_user_repo_cache(user_id, index_req.repo_name)
+        logger.info(f"✅ Successfully indexed {index_req.file_path}")
         return {"status": "success", "snippet_id": result.data[0].get("id")}
 
     except HTTPException:
@@ -541,16 +545,15 @@ async def index_snippet(request: IndexRequest, current_user: AuthenticatedUser =
         raise HTTPException(status_code=500, detail="Indexing failed due to an internal error.")
 
 
-# Protected Endpoint: Ingest Repository
 @app.post("/ingest")
-async def ingest_repo(request: IngestRequest, current_user: AuthenticatedUser = Depends(get_current_user)):
+async def ingest_repo(ingest_req: IngestRequest, current_user: AuthenticatedUser = Depends(get_current_user)):
     if not db:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database client is not initialized.")
 
-    verify_identity_match(current_user.id, request.user_id)
+    verify_identity_match(current_user.id, ingest_req.user_id)
     user_id = current_user.id
 
-    canonical_url = validate_and_normalize_github_url(request.repo_url)
+    canonical_url = validate_and_normalize_github_url(ingest_req.repo_url)
     rate_limiter.check_and_record(user_id)
 
     if not validate_dns_ip_safety("github.com"):
@@ -657,7 +660,6 @@ async def ingest_repo(request: IngestRequest, current_user: AuthenticatedUser = 
             logger.warning("Cleanup failed [op=ingest_cleanup, exc_type=%s]", type(cleanup_e).__name__)
 
 
-# Protected Endpoint: User Repositories
 @app.get("/user-repos")
 async def get_user_repos(
     user_id: Optional[str] = Query(None, min_length=1, max_length=200),
@@ -678,7 +680,6 @@ async def get_user_repos(
         raise HTTPException(status_code=500, detail="Failed to fetch repositories.")
 
 
-# Protected Endpoint: Delete Repository
 @app.post("/delete-repo")
 async def delete_repo(
     repo_name: str = Query(..., min_length=1, max_length=200),
@@ -700,7 +701,6 @@ async def delete_repo(
         raise HTTPException(status_code=500, detail="Failed to delete repository.")
 
 
-# Protected Endpoint: Graph Data
 @app.get("/graph-data")
 async def get_graph_data(
     user_id: Optional[str] = Query(None, min_length=1, max_length=200),
@@ -745,7 +745,6 @@ async def get_graph_data(
         raise HTTPException(status_code=500, detail="Failed to generate graph visualization.")
 
 
-# Root endpoint (Public)
 @app.get("/")
 async def root():
     return {
@@ -763,7 +762,6 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-
     port = int(os.environ.get("PORT", 7860))
     host = os.environ.get("HOST", "0.0.0.0")
     uvicorn.run(app, host=host, port=port)

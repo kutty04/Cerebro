@@ -7,10 +7,11 @@ import subprocess
 from pathlib import Path
 import pytest
 from unittest.mock import MagicMock, patch
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from app import app as fastapi_app
+from security.auth import AuthenticatedUser, get_current_user
 from ingestion_validator import (
     DEFAULT_LIMITS,
     IngestionLimits,
@@ -25,7 +26,25 @@ from ingestion_validator import (
 )
 import indexer
 
-AUTH_HEADERS = {"Authorization": "Bearer mock-token-user-user-123"}
+AUTH_HEADERS = {"Authorization": "Bearer test-user-user-123"}
+
+
+@pytest.fixture(autouse=True)
+def setup_test_overrides():
+    def mock_get_current_user(request: Request):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Authentication required: missing Authorization header.")
+
+        token = auth_header.replace("Bearer ", "").strip()
+        if not token:
+            raise HTTPException(status_code=401, detail="Empty authentication token provided.")
+
+        return AuthenticatedUser(id="user-123", email="user-123@test.com", access_token=token)
+
+    fastapi_app.dependency_overrides[get_current_user] = mock_get_current_user
+    yield
+    fastapi_app.dependency_overrides.clear()
 
 
 @pytest.fixture

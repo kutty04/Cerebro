@@ -2,8 +2,10 @@ import sqlite3
 import time
 import json
 import hashlib
+import uuid
+import datetime
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 DB_PATH = "coderag_telemetry.db"
 logger = logging.getLogger(__name__)
@@ -12,10 +14,36 @@ logger = logging.getLogger(__name__)
 def init_db():
     """
     Initializes SQLite telemetry DB and safely performs idempotent schema migrations
-    to ensure search_logs, chat_history, and query_cache support user-scoped isolation.
+    to support versioned conversations, chat messages, search logs, and query cache.
     """
     try:
         with sqlite3.connect(DB_PATH) as conn:
+            # Table 1: Conversations (Server-side UUID threads)
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    repo_filter TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Table 2: Chat Messages (Associated with conversations and user_id)
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    sources_json TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+                )
+            ''')
+
+            # Table 3: Search Logs
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS search_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,51 +55,32 @@ def init_db():
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS chat_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    thread_id TEXT,
-                    user_id TEXT,
-                    query TEXT,
-                    answer TEXT,
-                    context_json TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
+
+            # Table 4: Query Cache (Multi-dimensional SHA-256 payload key)
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS query_cache (
                     query_hash TEXT PRIMARY KEY,
-                    user_id TEXT,
+                    user_id TEXT NOT NULL,
                     repo_filter TEXT,
-                    answer TEXT,
+                    answer TEXT NOT NULL,
                     sources_json TEXT,
                     confidence INTEGER,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
 
-            # Migration: Ensure user_id column exists in search_logs
+            # Create Indexes for fast user-scoped queries
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_conv_user ON chat_messages(conversation_id, user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_search_logs_user ON search_logs(user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_query_cache_user_repo ON query_cache(user_id, repo_filter)")
+
+            # Migration: Ensure columns exist if upgraded from older schema
             cursor = conn.cursor()
             cursor.execute("PRAGMA table_info(search_logs)")
             cols = [row[1] for row in cursor.fetchall()]
             if "user_id" not in cols:
                 conn.execute("ALTER TABLE search_logs ADD COLUMN user_id TEXT")
-                logger.info("Migrated search_logs: added user_id column")
-
-            # Migration: Ensure user_id column exists in chat_history
-            cursor.execute("PRAGMA table_info(chat_history)")
-            cols = [row[1] for row in cursor.fetchall()]
-            if "user_id" not in cols:
-                conn.execute("ALTER TABLE chat_history ADD COLUMN user_id TEXT")
-                logger.info("Migrated chat_history: added user_id column")
-
-            # Migration: Ensure user_id and repo_filter exist in query_cache
-            cursor.execute("PRAGMA table_info(query_cache)")
-            cols = [row[1] for row in cursor.fetchall()]
-            if "user_id" not in cols:
-                conn.execute("ALTER TABLE query_cache ADD COLUMN user_id TEXT")
-            if "repo_filter" not in cols:
-                conn.execute("ALTER TABLE query_cache ADD COLUMN repo_filter TEXT")
 
     except Exception as e:
         logger.error("Telemetry database init failed [op=init_db, exc_type=%s]", type(e).__name__)
@@ -81,26 +90,72 @@ def init_db():
 init_db()
 
 
-def get_cache_key(query: str, repo_filter: Optional[str], user_id: str) -> str:
+def get_cache_key(
+    query: str,
+    user_id: str,
+    repo_filter: Optional[str] = None,
+    model: str = "meta-llama/Llama-3.1-8B-Instruct",
+    index_version: str = "v1",
+    top_k: int = 5,
+    retrieval_strategy: str = "hybrid_v1",
+    prompt_version: str = "v1",
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """
-    Computes a SHA-256 cache key strictly scoped by query, repo_filter, and authenticated user_id.
+    Computes a canonical SHA-256 cache key using deterministic JSON payload serialization.
+    Enforces multi-dimensional isolation across query, repo, model, index, strategy, top_k, prompt, and conversation context.
     """
-    raw = f"{query}_{repo_filter or 'ALL'}_{user_id}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    context_str = json.dumps(history or [], sort_keys=True)
+    context_hash = hashlib.sha256(context_str.encode("utf-8")).hexdigest()
+
+    payload = {
+        "version": "v1",
+        "user_id": user_id,
+        "repo_filter": repo_filter or "ALL",
+        "normalized_query": query.strip().lower(),
+        "model": model,
+        "index_version": index_version,
+        "top_k": top_k,
+        "retrieval_strategy": retrieval_strategy,
+        "prompt_version": prompt_version,
+        "context_hash": context_hash,
+    }
+    canonical_str = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
 
 
-def get_cached_query(query: str, repo_filter: Optional[str], user_id: str):
+def get_cached_query(
+    query: str,
+    user_id: str,
+    repo_filter: Optional[str] = None,
+    model: str = "meta-llama/Llama-3.1-8B-Instruct",
+    index_version: str = "v1",
+    top_k: int = 5,
+    retrieval_strategy: str = "hybrid_v1",
+    prompt_version: str = "v1",
+    history: Optional[List[Dict[str, Any]]] = None,
+):
     """
-    Reads query cache strictly filtered by SHA-256 hash and user_id.
+    Reads query cache strictly matching canonical SHA-256 hash and user_id (valid for 24 hours).
     """
     if not user_id:
         return None
 
     try:
+        key = get_cache_key(
+            query=query,
+            user_id=user_id,
+            repo_filter=repo_filter,
+            model=model,
+            index_version=index_version,
+            top_k=top_k,
+            retrieval_strategy=retrieval_strategy,
+            prompt_version=prompt_version,
+            history=history,
+        )
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            key = get_cache_key(query, repo_filter, user_id)
             cursor.execute('''
                 SELECT answer, sources_json, confidence 
                 FROM query_cache 
@@ -118,15 +173,38 @@ def get_cached_query(query: str, repo_filter: Optional[str], user_id: str):
     return None
 
 
-def set_cached_query(query: str, repo_filter: Optional[str], answer: str, sources: list, confidence: int, user_id: str):
+def set_cached_query(
+    query: str,
+    user_id: str,
+    answer: str,
+    sources: list,
+    confidence: int,
+    repo_filter: Optional[str] = None,
+    model: str = "meta-llama/Llama-3.1-8B-Instruct",
+    index_version: str = "v1",
+    top_k: int = 5,
+    retrieval_strategy: str = "hybrid_v1",
+    prompt_version: str = "v1",
+    history: Optional[List[Dict[str, Any]]] = None,
+):
     """
-    Writes query cache strictly scoped by authenticated user_id.
+    Writes query cache strictly scoped by canonical SHA-256 hash and authenticated user_id.
     """
     if not user_id:
         return
 
     try:
-        key = get_cache_key(query, repo_filter, user_id)
+        key = get_cache_key(
+            query=query,
+            user_id=user_id,
+            repo_filter=repo_filter,
+            model=model,
+            index_version=index_version,
+            top_k=top_k,
+            retrieval_strategy=retrieval_strategy,
+            prompt_version=prompt_version,
+            history=history,
+        )
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute('''
                 INSERT OR REPLACE INTO query_cache (query_hash, user_id, repo_filter, answer, sources_json, confidence)
@@ -138,7 +216,7 @@ def set_cached_query(query: str, repo_filter: Optional[str], answer: str, source
 
 def invalidate_user_repo_cache(user_id: str, repo_filter: Optional[str] = None):
     """
-    Purges cache entries owned by user_id (and optionally filtered by repo_name)
+    Purges cache entries owned by user_id (and optionally matching repo_filter)
     upon repository re-indexing or repository deletion.
     """
     if not user_id:
@@ -155,6 +233,83 @@ def invalidate_user_repo_cache(user_id: str, repo_filter: Optional[str] = None):
         logger.error("Telemetry cache invalidation failed [op=cache_invalidate, exc_type=%s]", type(e).__name__)
 
 
+# ----------------------------------------------------------------------
+# CONVERSATION THREAD MANAGEMENT
+# ----------------------------------------------------------------------
+
+def create_conversation(user_id: str, repo_filter: Optional[str] = None) -> str:
+    """Creates a new server-side conversation thread UUID for the authenticated user."""
+    conv_id = str(uuid.uuid4())
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO conversations (id, user_id, repo_filter, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (conv_id, user_id, repo_filter or "ALL", now, now)
+            )
+    except Exception as e:
+        logger.error("Failed to create conversation [op=create_conversation, exc_type=%s]", type(e).__name__)
+    return conv_id
+
+
+def verify_and_get_conversation(conv_id: str, user_id: str) -> Optional[Dict]:
+    """
+    Verifies that a conversation thread exists and belongs strictly to user_id.
+    Returns conversation metadata if valid, or None if unknown or owned by another user.
+    """
+    if not conv_id or not user_id:
+        return None
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, user_id, repo_filter, created_at, updated_at FROM conversations WHERE id = ? AND user_id = ?",
+                (conv_id, user_id)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except Exception as e:
+        logger.error("Failed to verify conversation [op=verify_conversation, exc_type=%s]", type(e).__name__)
+        return None
+
+
+def add_message_to_conversation(conv_id: str, user_id: str, role: str, content: str, sources: Optional[List[dict]] = None):
+    """Appends a message to a conversation thread and updates the updated_at timestamp."""
+    try:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO chat_messages (conversation_id, user_id, role, content, sources_json) VALUES (?, ?, ?, ?, ?)",
+                (conv_id, user_id, role, content, json.dumps(sources or []))
+            )
+            conn.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ? AND user_id = ?",
+                (now, conv_id, user_id)
+            )
+    except Exception as e:
+        logger.error("Failed to add message to conversation [op=add_message, exc_type=%s]", type(e).__name__)
+
+
+def get_conversation_messages(conv_id: str, user_id: str, limit: int = 12) -> List[Dict]:
+    """Retrieves up to `limit` recent messages from a conversation owned by user_id."""
+    if not verify_and_get_conversation(conv_id, user_id):
+        return []
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, conversation_id, role, content, sources_json, timestamp FROM chat_messages "
+                "WHERE conversation_id = ? AND user_id = ? ORDER BY id ASC LIMIT ?",
+                (conv_id, user_id, limit)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        logger.error("Failed to fetch conversation messages [op=get_messages, exc_type=%s]", type(e).__name__)
+        return []
+
+
 def log_search(query: str, repo_filter: Optional[str], confidence: int, latency_ms: float, user_id: Optional[str] = None):
     try:
         with sqlite3.connect(DB_PATH) as conn:
@@ -164,17 +319,6 @@ def log_search(query: str, repo_filter: Optional[str], confidence: int, latency_
             ''', (query, str(repo_filter) if repo_filter else "ALL", confidence, latency_ms, user_id))
     except Exception as e:
         logger.error("Telemetry search logging failed [op=log_search, exc_type=%s]", type(e).__name__)
-
-
-def save_chat(thread_id: str, query: str, answer: str, sources: List[dict], user_id: Optional[str] = None):
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute('''
-                INSERT INTO chat_history (thread_id, user_id, query, answer, context_json)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (thread_id, user_id, query, answer, json.dumps(sources)))
-    except Exception as e:
-        logger.error("Telemetry chat save failed [op=save_chat, exc_type=%s]", type(e).__name__)
 
 
 def get_analytics(user_id: str) -> Dict:
@@ -217,8 +361,7 @@ def get_analytics(user_id: str) -> Dict:
 
 def get_chat_history(user_id: str) -> List[Dict]:
     """
-    Fetches chat history strictly scoped by authenticated user_id.
-    Quarantines/ignores legacy unscoped rows.
+    Fetches recent conversations and messages strictly scoped by authenticated user_id.
     """
     if not user_id:
         return []
@@ -228,7 +371,7 @@ def get_chat_history(user_id: str) -> List[Dict]:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, query, answer, timestamp FROM chat_history "
+                "SELECT id, conversation_id, role, content, timestamp FROM chat_messages "
                 "WHERE user_id = ? ORDER BY id DESC LIMIT 50",
                 (user_id,)
             )

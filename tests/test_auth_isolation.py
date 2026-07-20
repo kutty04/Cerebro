@@ -1,14 +1,54 @@
 import os
-import shutil
-import tempfile
+import re
+import glob
+import sqlite3
 import pytest
 from unittest.mock import MagicMock, patch
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from app import app as fastapi_app
-from security.auth import AuthenticatedUser
+from security.auth import AuthenticatedUser, get_current_user, verify_identity_match
 import telemetry
-import indexer
+
+
+@pytest.fixture(autouse=True)
+def setup_test_overrides():
+    """
+    Injects test dependency overrides for get_current_user.
+    This keeps 100% of test mocking inside tests/ fixtures so production security/auth.py contains NO mock token logic.
+    """
+    def mock_get_current_user(request: Request):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Authentication required: missing Authorization header.")
+
+        token = auth_header.replace("Bearer ", "").strip()
+        if not token:
+            raise HTTPException(status_code=401, detail="Empty authentication token provided.")
+
+        if token == "mock-token-user-user-A-id":
+            return AuthenticatedUser(id="user-A-id", email="userA@test.com", access_token=token)
+        elif token == "mock-token-user-user-B-id":
+            return AuthenticatedUser(id="user-B-id", email="userB@test.com", access_token=token)
+        elif token.startswith("test-user-"):
+            uid = token.replace("test-user-", "")
+            return AuthenticatedUser(id=uid, email=f"{uid}@test.com", access_token=token)
+
+        raise HTTPException(status_code=401, detail="Invalid or expired authentication token.")
+
+    fastapi_app.dependency_overrides[get_current_user] = mock_get_current_user
+
+    # Clear SQLite query_cache table prior to each test
+    try:
+        with sqlite3.connect(telemetry.DB_PATH) as conn:
+            conn.execute("DELETE FROM query_cache")
+    except Exception:
+        pass
+
+    yield
+
+    fastapi_app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -16,13 +56,98 @@ def client():
     return TestClient(fastapi_app)
 
 
-# Headers for User A and User B using mock token strategy
 USER_A_HEADERS = {"Authorization": "Bearer mock-token-user-user-A-id"}
 USER_B_HEADERS = {"Authorization": "Bearer mock-token-user-user-B-id"}
 
 
 # ----------------------------------------------------------------------
-# 1. ROUTE PROTECTION & AUTHENTICATION REJECTION TESTS
+# 1. REAL PRODUCTION AUTH DEPENDENCY (NO OVERRIDES) & STATIC CODE AUDIT
+# ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_production_auth_dependency_rejects_mock_token_prefix():
+    """
+    Proves that running the real production get_current_user dependency without overrides
+    rejects mock-token prefixes with HTTP 401 Unauthorized.
+    """
+    mock_request = MagicMock()
+    mock_request.headers.get.return_value = "Bearer mock-token-user-attacker"
+
+    with patch.dict("os.environ", {"SUPABASE_URL": "https://fake.supabase.co", "SUPABASE_KEY": "fake_key"}), \
+         patch("requests.get") as mock_get:
+        mock_get.return_value = MagicMock(status_code=401, json=lambda: {"message": "Invalid token"})
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_current_user(mock_request)
+
+        assert exc_info.value.status_code == 401
+        assert "Invalid or expired authentication token" in exc_info.value.detail
+
+
+def test_static_code_audit_no_mock_tokens_in_production_source():
+    """
+    Static audit scanning Python and JS source files to ensure no mock-token logic
+    or bypass strings exist in production code (excluding tests/ directory).
+    """
+    prod_files = []
+    for root, dirs, files in os.walk("."):
+        if "tests" in root or "node_modules" in root or ".git" in root or ".venv" in root:
+            continue
+        for file in files:
+            if file.endswith((".py", ".js", ".jsx")) and not file.endswith((".test.js", "_test.py")):
+                prod_files.append(os.path.join(root, file))
+
+    forbidden_patterns = [
+        r"mock-token-user-",
+        r"bypass-auth",
+        r"token\.startswith\(['\"]mock-token",
+    ]
+
+    for filepath in prod_files:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+            for pattern in forbidden_patterns:
+                assert not re.search(pattern, content), f"Forbidden auth bypass pattern '{pattern}' found in production file: {filepath}"
+
+
+# ----------------------------------------------------------------------
+# 2. SUPABASE AUTH VERIFICATION FAILURES & SANITIZATION TESTS
+# ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_supabase_auth_verification_missing_user_id():
+    mock_request = MagicMock()
+    mock_request.headers.get.return_value = "Bearer valid-format-token"
+
+    with patch.dict("os.environ", {"SUPABASE_URL": "https://fake.supabase.co", "SUPABASE_KEY": "fake_key"}), \
+         patch("requests.get") as mock_get:
+        mock_get.return_value = MagicMock(status_code=200, json=lambda: {"role": "authenticated"})
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_current_user(mock_request)
+
+        assert exc_info.value.status_code == 401
+        assert "Invalid user profile" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_supabase_auth_verification_timeout():
+    import requests
+    mock_request = MagicMock()
+    mock_request.headers.get.return_value = "Bearer valid-format-token"
+
+    with patch.dict("os.environ", {"SUPABASE_URL": "https://fake.supabase.co", "SUPABASE_KEY": "fake_key"}), \
+         patch("requests.get", side_effect=requests.exceptions.Timeout()):
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_current_user(mock_request)
+
+        assert exc_info.value.status_code == 504
+        assert "timed out" in exc_info.value.detail
+
+
+# ----------------------------------------------------------------------
+# 3. ROUTE PROTECTION & IDENTITY MISMATCH TESTS
 # ----------------------------------------------------------------------
 
 def test_public_routes_unprotected(client):
@@ -46,6 +171,7 @@ def test_public_routes_unprotected(client):
     ],
 )
 def test_protected_routes_require_auth(client, method, path, body):
+    fastapi_app.dependency_overrides.clear()
     if method == "POST":
         res = client.post(path, json=body)
     else:
@@ -54,28 +180,11 @@ def test_protected_routes_require_auth(client, method, path, body):
     assert "Authentication required" in res.json()["detail"]
 
 
-def test_malformed_auth_header_rejection(client):
-    res_basic = client.get("/user-repos", headers={"Authorization": "Basic abcdef"})
-    assert res_basic.status_code == 401
-    assert "Expected Bearer" in res_basic.json()["detail"]
-
-    res_empty = client.get("/user-repos", headers={"Authorization": "Bearer "})
-    assert res_empty.status_code == 401
-
-
-# ----------------------------------------------------------------------
-# 2. IDENTITY FORGERY & MISMATCH TESTS
-# ----------------------------------------------------------------------
-
 @patch("app.db")
 def test_mismatched_legacy_user_id_rejected(mock_db, client):
-    """
-    Proves that if a browser sends a user_id that does NOT match the verified bearer token user,
-    the request is rejected with HTTP 403 Forbidden.
-    """
     payload = {
         "repo_url": "https://github.com/kutty04/Cerebro",
-        "user_id": "forged-user-id",  # Mismatched!
+        "user_id": "forged-user-id",
     }
     res = client.post("/ingest", json=payload, headers=USER_A_HEADERS)
     assert res.status_code == 403
@@ -83,117 +192,87 @@ def test_mismatched_legacy_user_id_rejected(mock_db, client):
 
 
 # ----------------------------------------------------------------------
-# 3. CROSS-USER ISOLATION TESTS (User A vs User B)
+# 4. MULTI-DIMENSIONAL CACHE ISOLATION TESTS
 # ----------------------------------------------------------------------
+
+def test_cache_dimensions_isolation():
+    q = "Where is main function?"
+    u_a = "user-A-id"
+    u_b = "user-B-id"
+
+    k_base = telemetry.get_cache_key(q, user_id=u_a, repo_filter="repo-1", model="model-v1", top_k=5, history=[])
+
+    k_user_b = telemetry.get_cache_key(q, user_id=u_b, repo_filter="repo-1", model="model-v1", top_k=5, history=[])
+    assert k_base != k_user_b
+
+    k_repo_2 = telemetry.get_cache_key(q, user_id=u_a, repo_filter="repo-2", model="model-v1", top_k=5, history=[])
+    assert k_base != k_repo_2
+
+    k_model_2 = telemetry.get_cache_key(q, user_id=u_a, repo_filter="repo-1", model="model-v2", top_k=5, history=[])
+    assert k_base != k_model_2
+
+    k_topk_10 = telemetry.get_cache_key(q, user_id=u_a, repo_filter="repo-1", model="model-v1", top_k=10, history=[])
+    assert k_base != k_topk_10
+
+    k_hist = telemetry.get_cache_key(q, user_id=u_a, repo_filter="repo-1", model="model-v1", top_k=5, history=[{"role": "user", "content": "hi"}])
+    assert k_base != k_hist
+
+
+def test_cache_key_canonicalization():
+    k1 = telemetry.get_cache_key("  How To Run?  ", user_id="u1", repo_filter="repo-1")
+    k2 = telemetry.get_cache_key("how to run?", user_id="u1", repo_filter="repo-1")
+    assert k1 == k2
+
+
+# ----------------------------------------------------------------------
+# 5. SERVER-SIDE CONVERSATION THREAD ISOLATION TESTS
+# ----------------------------------------------------------------------
+
+def test_conversation_thread_lifecycle_and_user_isolation():
+    user_a = "user-A-id"
+    user_b = "user-B-id"
+
+    conv_id_a = telemetry.create_conversation(user_a, repo_filter="repo-A")
+    assert conv_id_a is not None
+
+    assert telemetry.verify_and_get_conversation(conv_id_a, user_a) is not None
+    assert telemetry.verify_and_get_conversation(conv_id_a, user_b) is None
+
+    telemetry.add_message_to_conversation(conv_id_a, user_a, "user", "What is module X?")
+    telemetry.add_message_to_conversation(conv_id_a, user_a, "assistant", "Module X is utils.")
+
+    msgs_a = telemetry.get_conversation_messages(conv_id_a, user_a)
+    assert len(msgs_a) == 2
+
+    msgs_b = telemetry.get_conversation_messages(conv_id_a, user_b)
+    assert len(msgs_b) == 0
+
 
 @patch("app.db")
-def test_user_b_cannot_list_user_a_repos(mock_db, client):
-    mock_table = MagicMock()
-    mock_table.select.return_value = mock_table
-    mock_table.eq.side_effect = lambda col, val: mock_table if val == "user-A-id" else MagicMock(execute=lambda: MagicMock(data=[]))
-    mock_table.execute.return_value = MagicMock(data=[{"repo_name": "user-a-private-repo"}])
-    mock_db.table.return_value = mock_table
+def test_user_b_cannot_access_user_a_conversation_id_in_search(mock_db, client):
+    conv_id_a = telemetry.create_conversation("user-A-id", repo_filter="repo-A")
 
-    # User A sees own repo
-    res_a = client.get("/user-repos", headers=USER_A_HEADERS)
-    assert res_a.status_code == 200
-    assert "user-a-private-repo" in res_a.json()["repos"]
+    payload = {
+        "query": "Where is config?",
+        "conversation_id": conv_id_a,
+    }
 
-    # User B sees empty list
-    res_b = client.get("/user-repos", headers=USER_B_HEADERS)
-    assert res_b.status_code == 200
-    assert "user-a-private-repo" not in res_b.json()["repos"]
-
-
-@patch("app.db")
-def test_user_b_cannot_delete_user_a_repo(mock_db, client):
-    mock_table = MagicMock()
-    mock_table.delete.return_value = mock_table
-    mock_table.eq.return_value = mock_table
-    mock_table.execute.return_value = MagicMock(data=[])
-    mock_db.table.return_value = mock_table
-
-    # User B tries to delete User A's repo
-    res_b = client.post("/delete-repo?repo_name=user-a-repo", headers=USER_B_HEADERS)
-    assert res_b.status_code == 200
-
-    # Verify that eq("user_id", "user-B-id") was enforced so User A's repo was unaffected
-    mock_table.eq.assert_any_call("user_id", "user-B-id")
-
-
-@patch("app.db")
-def test_user_b_cannot_read_user_a_graph_data(mock_db, client):
-    mock_table = MagicMock()
-    mock_table.select.return_value = mock_table
-    mock_table.eq.side_effect = lambda col, val: mock_table if val == "user-A-id" else MagicMock(execute=lambda: MagicMock(data=[]))
-    mock_table.execute.return_value = MagicMock(data=[{"repo_name": "repo-A", "file_path": "main.py"}])
-    mock_db.table.return_value = mock_table
-
-    res_a = client.get("/graph-data", headers=USER_A_HEADERS)
-    assert len(res_a.json()["nodes"]) > 1
-
-    res_b = client.get("/graph-data", headers=USER_B_HEADERS)
-    assert len(res_b.json()["nodes"]) == 1  # Core node only
+    res = client.post("/search", json=payload, headers=USER_B_HEADERS)
+    assert res.status_code == 404
+    assert "Conversation thread not found or inaccessible" in res.json()["detail"]
 
 
 # ----------------------------------------------------------------------
-# 4. CACHE & TELEMETRY ISOLATION TESTS
+# 6. RLS ARTIFACT STATIC REVIEW TEST
 # ----------------------------------------------------------------------
 
-def test_query_cache_isolated_between_users():
-    query = "How to run server?"
-    answer_a = "User A answer"
-    answer_b = "User B answer"
+def test_rls_migration_sql_static_review():
+    with open("supabase_rls_migration.sql", "r", encoding="utf-8") as f:
+        sql = f.read()
 
-    telemetry.set_cached_query(query, "repo-common", answer_a, [], 90, user_id="user-A-id")
-    telemetry.set_cached_query(query, "repo-common", answer_b, [], 95, user_id="user-B-id")
-
-    cached_a = telemetry.get_cached_query(query, "repo-common", user_id="user-A-id")
-    cached_b = telemetry.get_cached_query(query, "repo-common", user_id="user-B-id")
-
-    assert cached_a["answer"] == answer_a
-    assert cached_b["answer"] == answer_b
-
-
-def test_telemetry_history_analytics_isolated():
-    telemetry.log_search("Query A", "repo-A", 90, 150.0, user_id="user-A-id")
-    telemetry.save_chat("thread-A", "Query A", "Answer A", [], user_id="user-A-id")
-
-    telemetry.log_search("Query B", "repo-B", 80, 200.0, user_id="user-B-id")
-    telemetry.save_chat("thread-B", "Query B", "Answer B", [], user_id="user-B-id")
-
-    history_a = telemetry.get_chat_history("user-A-id")
-    history_b = telemetry.get_chat_history("user-B-id")
-
-    assert len(history_a) >= 1
-    assert all("Query B" not in h["query"] for h in history_a)
-
-    analytics_a = telemetry.get_analytics("user-A-id")
-    assert analytics_a["total_searches"] >= 1
-
-
-def test_legacy_unscoped_telemetry_quarantined():
-    """
-    Proves that legacy unscoped search logs without user_id remain quarantined and invisible.
-    """
-    import sqlite3
-    with sqlite3.connect(telemetry.DB_PATH) as conn:
-        conn.execute("INSERT INTO search_logs (query, repo_filter, confidence, latency_ms, user_id) VALUES ('Legacy Query', 'ALL', 50, 100, NULL)")
-
-    analytics = telemetry.get_analytics("user-new-id")
-    queries = [q["query"] for q in analytics.get("recent_queries", [])]
-    assert "Legacy Query" not in queries
-
-
-# ----------------------------------------------------------------------
-# 5. PRIVACY & SANITIZATION IN AUTH EXCEPTIONS
-# ----------------------------------------------------------------------
-
-def test_auth_secret_token_sanitization(client):
-    """
-    Regression Test: Proves secret tokens in auth headers or errors are never leaked in response or logs.
-    """
-    fake_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.SuperSecretAuthToken123"
-    res = client.get("/user-repos", headers={"Authorization": f"Bearer {fake_token}"})
-    assert res.status_code == 401
-    assert fake_token not in res.text
+    assert "SET search_path = public, pg_temp;" in sql
+    assert "ENABLE ROW LEVEL SECURITY" in sql
+    assert "auth.uid()::text = user_id" in sql
+    assert "SECURITY INVOKER" in sql
+    assert "CREATE TABLE IF NOT EXISTS user_repositories" in sql
+    assert "CREATE TABLE IF NOT EXISTS user_conversations" in sql

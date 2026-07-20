@@ -1,22 +1,40 @@
-import pytest
 import sqlite3
+import pytest
 from unittest.mock import MagicMock, patch
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 import logging
 
-import app
 from app import app as fastapi_app
+from security.auth import AuthenticatedUser, get_current_user
 
-AUTH_HEADERS = {"Authorization": "Bearer mock-token-user-user-123"}
+AUTH_HEADERS = {"Authorization": "Bearer test-user-user-123"}
 
 
 @pytest.fixture(autouse=True)
-def clear_cache():
+def setup_test_overrides():
+    def mock_get_current_user(request: Request):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Authentication required: missing Authorization header.")
+
+        token = auth_header.replace("Bearer ", "").strip()
+        if not token:
+            raise HTTPException(status_code=401, detail="Empty authentication token provided.")
+
+        return AuthenticatedUser(id="user-123", email="user-123@test.com", access_token=token)
+
+    fastapi_app.dependency_overrides[get_current_user] = mock_get_current_user
+
     try:
         with sqlite3.connect("coderag_telemetry.db") as conn:
             conn.execute("DELETE FROM query_cache")
     except Exception:
         pass
+
+    yield
+
+    fastapi_app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -121,11 +139,12 @@ def test_search_user_scoped_rpc(mock_req_post, mock_get_embedding, mock_db, clie
     with patch.dict("os.environ", {"HF_TOKEN": "mock_token"}):
         response = client.post(
             "/search",
-            json={"query": "How do I run main?", "top_k": 5},
+            json={"query": "How do I run main in search_user_scoped_rpc?", "top_k": 5},
             headers=AUTH_HEADERS,
         )
 
     assert response.status_code == 200
+    assert "conversation_id" in response.json()
     mock_db.rpc.assert_called_once_with(
         "search_code_snippets",
         {
@@ -173,7 +192,7 @@ def test_search_secret_bearing_exception_sanitization(mock_get_embedding, mock_d
     with caplog.at_level(logging.ERROR), patch.dict("os.environ", {"HF_TOKEN": "mock_token"}):
         response = client.post(
             "/search",
-            json={"query": "How do I connect?"},
+            json={"query": "How do I connect secret test?"},
             headers=AUTH_HEADERS,
         )
 
@@ -290,4 +309,4 @@ def test_graph_data_endpoint(mock_db, client):
     data = response.json()
     assert "nodes" in data
     assert "links" in data
-    assert len(data["nodes"]) == 4  # Core + Repo + 2 Files
+    assert len(data["nodes"]) == 4
