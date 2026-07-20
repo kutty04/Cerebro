@@ -27,6 +27,18 @@ export default defineConfig({
             purpose: 'any maskable'
           }
         ]
+      },
+      workbox: {
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest}'],
+        runtimeCaching: [
+          {
+            urlPattern: ({ url }) => {
+              const paths = ['/search', '/ingest', '/index', '/user-repos', '/delete-repo', '/graph-data', '/history', '/analytics', '/readiness', '/health'];
+              return paths.some(p => url.pathname.startsWith(p) || url.pathname.includes(p)) || url.pathname.startsWith('/api');
+            },
+            handler: 'NetworkOnly',
+          }
+        ]
       }
     })
   ],

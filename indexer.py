@@ -14,12 +14,6 @@ _http_adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=
 http_client.mount("https://", _http_adapter)
 http_client.mount("http://", _http_adapter)
 
-# Under pytest, use a dynamic wrapper so `patch("requests.post")` intercepts
-# calls made through this session-pooled client.
-if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
-    def _test_post(*args, **kwargs):  # noqa: E306
-        return requests.post(*args, **kwargs)
-    http_client.post = _test_post  # type: ignore[method-assign]
 
 
 from ingestion_validator import DEFAULT_LIMITS, IngestionLimits

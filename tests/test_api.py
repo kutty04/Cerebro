@@ -95,7 +95,7 @@ def test_search_validation_invalid_top_k(client):
 
 @patch("app.db")
 @patch("app.get_embedding")
-@patch("requests.post")
+@patch("app.http_client.post")
 def test_search_user_scoped_rpc(mock_req_post, mock_get_embedding, mock_db, client):
     mock_get_embedding.return_value = [0.1] * 384
 
@@ -310,3 +310,240 @@ def test_graph_data_endpoint(mock_db, client):
     assert "nodes" in data
     assert "links" in data
     assert len(data["nodes"]) == 4
+
+
+# ----------------------------------------------------------------------
+# PHASE 8 - Deployment Readiness & Telemetry Hardening Tests
+# ----------------------------------------------------------------------
+
+from app import validate_startup_config
+from telemetry import prune_old_telemetry, delete_user_repo_telemetry, DB_PATH
+import os
+
+
+def test_validate_startup_config_valid():
+    with patch.dict(os.environ, {
+        "SUPABASE_URL": "https://example.supabase.co",
+        "SUPABASE_SERVICE_ROLE_KEY": "valid-service-role-key-123",
+        "HF_TOKEN": "valid-hf-token-abc"
+    }):
+        assert validate_startup_config() is True
+
+
+def test_validate_startup_config_missing():
+    with patch.dict(os.environ, {}, clear=True):
+        assert validate_startup_config() is False
+
+
+def test_validate_startup_config_placeholders():
+    with patch.dict(os.environ, {
+        "SUPABASE_URL": "https://your-project.supabase.co",
+        "SUPABASE_SERVICE_ROLE_KEY": "your_supabase_anon_key_here",
+        "HF_TOKEN": "your_huggingface_api_token_here"
+    }):
+        assert validate_startup_config() is False
+
+
+def test_readiness_fails_with_placeholders_in_production(client):
+    with patch.dict(os.environ, {
+        "PRODUCTION": "true",
+        "SUPABASE_URL": "https://example.supabase.co",
+        "SUPABASE_SERVICE_ROLE_KEY": "your_supabase_anon_key_here",
+        "HF_TOKEN": "your_huggingface_api_token_here"
+    }), patch("app.db", MagicMock()):
+        response = client.get("/readiness")
+        assert response.status_code == 503
+        assert response.json()["status"] == "degraded"
+
+
+def test_security_headers_middleware(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert "Permissions-Policy" in response.headers
+
+
+def test_cache_control_on_sensitive_routes(client):
+    # Sensitive endpoints should return no-store
+    response = client.get("/history", headers=AUTH_HEADERS)
+    assert response.status_code == 200
+    assert "no-store" in response.headers["Cache-Control"]
+    assert "no-cache" in response.headers["Cache-Control"]
+    assert response.headers["Pragma"] == "no-cache"
+
+    # Non-sensitive root path should not have no-store cache control enforced by middleware
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Cache-Control" not in response.headers
+
+
+def test_telemetry_pruning():
+    import sqlite3
+    # Insert old entries into query_cache and search_logs, verify they get pruned
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM query_cache")
+        conn.execute("DELETE FROM search_logs")
+        conn.execute("DELETE FROM chat_messages")
+        conn.execute("DELETE FROM conversations")
+        
+        # 1. Old cache entry
+        conn.execute(
+            "INSERT INTO query_cache (query_hash, user_id, repo_filter, answer, sources_json, confidence, timestamp) "
+            "VALUES ('old-hash', 'user-123', 'repo-a', 'ans', '[]', 80, datetime('now', '-2 days'))"
+        )
+        # Fresh cache entry
+        conn.execute(
+            "INSERT INTO query_cache (query_hash, user_id, repo_filter, answer, sources_json, confidence, timestamp) "
+            "VALUES ('fresh-hash', 'user-123', 'repo-a', 'ans', '[]', 80, datetime('now'))"
+        )
+        # 2. Old search log
+        conn.execute(
+            "INSERT INTO search_logs (query, repo_filter, confidence, latency_ms, user_id, timestamp) "
+            "VALUES ('old-query', 'repo-a', 80, 100, 'user-123', datetime('now', '-31 days'))"
+        )
+        # Fresh search log
+        conn.execute(
+            "INSERT INTO search_logs (query, repo_filter, confidence, latency_ms, user_id, timestamp) "
+            "VALUES ('fresh-query', 'repo-a', 80, 100, 'user-123', datetime('now'))"
+        )
+        conn.commit()
+
+    prune_old_telemetry()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Cache pruning check
+        cursor.execute("SELECT query_hash FROM query_cache")
+        hashes = [r["query_hash"] for r in cursor.fetchall()]
+        assert "fresh-hash" in hashes
+        assert "old-hash" not in hashes
+
+        # Search logs pruning check
+        cursor.execute("SELECT query FROM search_logs")
+        queries = [r["query"] for r in cursor.fetchall()]
+        assert "fresh-query" in queries
+        assert "old-query" not in queries
+
+
+def test_telemetry_user_repo_scoped_purge():
+    import sqlite3
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM query_cache")
+        conn.execute("DELETE FROM search_logs")
+        conn.execute("DELETE FROM chat_messages")
+        conn.execute("DELETE FROM conversations")
+        
+        # Insert entries for user-123 repo-a
+        conn.execute("INSERT INTO query_cache (query_hash, user_id, repo_filter, answer, sources_json, confidence) VALUES ('h1', 'user-123', 'repo-a', 'ans', '[]', 80)")
+        # Insert entries for user-123 repo-b
+        conn.execute("INSERT INTO query_cache (query_hash, user_id, repo_filter, answer, sources_json, confidence) VALUES ('h2', 'user-123', 'repo-b', 'ans', '[]', 80)")
+        # Insert search log for user-123 repo-a
+        conn.execute("INSERT INTO search_logs (query, repo_filter, confidence, latency_ms, user_id) VALUES ('q1', 'repo-a', 80, 100, 'user-123')")
+        
+        # Conversation for user-123 repo-a
+        conn.execute("INSERT INTO conversations (id, user_id, repo_filter) VALUES ('conv-a', 'user-123', 'repo-a')")
+        conn.execute("INSERT INTO chat_messages (conversation_id, user_id, role, content) VALUES ('conv-a', 'user-123', 'user', 'hello')")
+        
+        # Conversation for user-123 repo-b
+        conn.execute("INSERT INTO conversations (id, user_id, repo_filter) VALUES ('conv-b', 'user-123', 'repo-b')")
+        conn.execute("INSERT INTO chat_messages (conversation_id, user_id, role, content) VALUES ('conv-b', 'user-123', 'user', 'hello')")
+        conn.commit()
+
+    # Purge repo-a telemetry for user-123
+    delete_user_repo_telemetry("user-123", "repo-a")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Cache check
+        cursor.execute("SELECT query_hash FROM query_cache")
+        hashes = [r["query_hash"] for r in cursor.fetchall()]
+        assert "h2" in hashes
+        assert "h1" not in hashes
+
+        # Search log check
+        cursor.execute("SELECT query FROM search_logs")
+        queries = [r["query"] for r in cursor.fetchall()]
+        assert len(queries) == 0
+
+        # Conversation check
+        cursor.execute("SELECT id FROM conversations")
+        convs = [r["id"] for r in cursor.fetchall()]
+        assert "conv-b" in convs
+        assert "conv-a" not in convs
+
+
+def test_telemetry_does_not_store_sensitive_keys():
+    import sqlite3
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM query_cache")
+        rows = cursor.fetchall()
+        for r in rows:
+            for val in r:
+                if val and isinstance(val, str):
+                    assert "bearer" not in val.lower()
+                    assert "service_role" not in val.lower()
+                    assert "supabase_key" not in val.lower()
+
+
+# ----------------------------------------------------------------------
+# STATIC AUDIT - Production files must not contain test-infrastructure code
+# ----------------------------------------------------------------------
+
+def test_no_pytest_contamination_in_production_sources():
+    """
+    Enforces that production application modules contain no pytest-specific
+    runtime behaviour.  Forbidden patterns:
+
+    - 'pytest' in sys.modules
+    - os.getenv('PYTEST_CURRENT_TEST')
+    - PYTEST_CURRENT_TEST (string literal)
+    - _test_post  (test-only HTTP wrapper symbol)
+    - mock_token  (test-credential literal)
+    - test-mode   (generic test-mode bypass string)
+
+    The tests/ directory is explicitly excluded.
+    """
+    import pathlib, re
+
+    # Production modules to audit (relative to repo root)
+    production_files = [
+        "app.py",
+        "indexer.py",
+        "telemetry.py",
+        "db_adapter.py",
+        "ingestion_validator.py",
+        "security/auth.py",
+    ]
+
+    forbidden_patterns = [
+        (r'"pytest"\s+in\s+sys\.modules', '"pytest" in sys.modules'),
+        (r"'pytest'\s+in\s+sys\.modules", "'pytest' in sys.modules"),
+        (r'PYTEST_CURRENT_TEST', 'PYTEST_CURRENT_TEST'),
+        (r'\b_test_post\b', '_test_post (test-only wrapper)'),
+        (r'\bmock_token\b', 'mock_token (test credential)'),
+        (r'test[_-]mode', 'test-mode bypass'),
+    ]
+
+    root = pathlib.Path(__file__).parent.parent
+    violations = []
+
+    for rel_path in production_files:
+        fpath = root / rel_path
+        if not fpath.exists():
+            continue
+        source = fpath.read_text(encoding="utf-8")
+        for pattern, label in forbidden_patterns:
+            if re.search(pattern, source):
+                violations.append(f"{rel_path}: contains [{label}]")
+
+    assert not violations, (
+        "Production source files contain test-infrastructure code:\n"
+        + "\n".join(f"  - {v}" for v in violations)
+    )

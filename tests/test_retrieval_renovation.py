@@ -91,7 +91,7 @@ def test_inactive_index_exclusion(client, mock_supabase, mock_embed):
         mock_supabase.table().select().eq().in_().execute.return_value = mock_select
         mock_supabase.table().select().eq().ilike().limit().execute.return_value = MagicMock(data=[])
         
-        with patch("requests.post") as mock_post:
+        with patch("app.http_client.post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.json.return_value = {
@@ -140,7 +140,7 @@ def test_rrf_and_file_diversity(client, mock_supabase, mock_embed):
         ]
         mock_supabase.table().select().eq().ilike().limit().execute.return_value = mock_kw
         
-        with patch("requests.post") as mock_post:
+        with patch("app.http_client.post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.json.return_value = {
@@ -176,7 +176,7 @@ def test_zero_evidence_fallback(client, mock_supabase, mock_embed):
         mock_supabase.rpc().execute.return_value = MagicMock(data=[])
         mock_supabase.table().select().eq().ilike().limit().execute.return_value = MagicMock(data=[])
         
-        with patch("requests.post") as mock_post:
+        with patch("app.http_client.post") as mock_post:
             headers = {"Authorization": "Bearer user-123"}
             response = client.post("/search", json={"query": "missing feature", "user_id": "user-123"}, headers=headers)
             
@@ -201,7 +201,7 @@ def test_cache_miss_on_index_or_strategy_change(client, mock_supabase, mock_embe
         mock_supabase.table().select().eq().in_().execute.return_value = mock_select
         mock_supabase.table().select().eq().ilike().limit().execute.return_value = MagicMock(data=[])
 
-        with patch("requests.post") as mock_post:
+        with patch("app.http_client.post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.json.return_value = {
@@ -250,7 +250,7 @@ def test_cache_full_restore_and_sources_array_only(client, mock_supabase, mock_e
         mock_supabase.table().select().eq().in_().execute.return_value = mock_select
         mock_supabase.table().select().eq().ilike().limit().execute.return_value = MagicMock(data=[])
 
-        with patch("requests.post") as mock_post:
+        with patch("app.http_client.post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.json.return_value = {
@@ -328,7 +328,7 @@ def test_legacy_cache_and_mixed_data_fallback(client, mock_supabase, mock_embed)
 
     mock_repos = [{"id": "repo-A", "repository_name": "repoA", "active_index_version": "v1"}]
     with patch("db_adapter.DatabaseAdapter.list_owned_repos", return_value=mock_repos):
-        with patch("requests.post") as mock_post:
+        with patch("app.http_client.post") as mock_post:
             headers = {"Authorization": "Bearer user-123"}
             response = client.post("/search", json={"query": "legacy query", "user_id": "user-123"}, headers=headers)
             assert response.status_code == 200
@@ -356,7 +356,7 @@ def test_legacy_cache_and_mixed_data_fallback(client, mock_supabase, mock_embed)
         mock_supabase.table().select().eq().in_().execute.return_value = mock_select
         mock_supabase.table().select().eq().ilike().limit().execute.return_value = MagicMock(data=[])
 
-        with patch("requests.post") as mock_post:
+        with patch("app.http_client.post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.json.return_value = {"choices": [{"message": {"content": json.dumps({"answer": "llm output", "summary": "", "citation_ids": [], "follow_ups": [], "limitations": []})}}]}
@@ -378,7 +378,7 @@ def test_legacy_cache_and_mixed_data_fallback(client, mock_supabase, mock_embed)
 
     # Schema-version changed response must produce cache miss
     with patch("db_adapter.DatabaseAdapter.list_owned_repos", return_value=mock_repos):
-        with patch("requests.post") as mock_post:
+        with patch("app.http_client.post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.json.return_value = {"choices": [{"message": {"content": json.dumps({"answer": "llm output v2", "summary": "", "citation_ids": [], "follow_ups": [], "limitations": []})}}]}
@@ -400,7 +400,7 @@ def test_invalid_and_unknown_citation_filtering(client, mock_supabase, mock_embe
         mock_supabase.table().select().eq().in_().execute.return_value = mock_select
         mock_supabase.table().select().eq().ilike().limit().execute.return_value = MagicMock(data=[])
 
-        with patch("requests.post") as mock_post:
+        with patch("app.http_client.post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.json.return_value = {
@@ -437,7 +437,7 @@ def test_timing_values_correctness(client, mock_supabase, mock_embed):
         mock_supabase.table().select().eq().in_().execute.return_value = mock_select
         mock_supabase.table().select().eq().ilike().limit().execute.return_value = MagicMock(data=[])
 
-        with patch("requests.post") as mock_post:
+        with patch("app.http_client.post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.json.return_value = {"choices": [{"message": {"content": json.dumps({"answer": "ok", "summary": "", "citation_ids": [], "follow_ups": [], "limitations": []})}}]}
@@ -462,7 +462,7 @@ def test_retry_matrix_and_rate_limiting(client, mock_supabase, mock_embed):
         mock_supabase.table().select().eq().ilike().limit().execute.return_value = MagicMock(data=[])
 
         # 1. 429 produces no retry and propagates Retry-After header
-        with patch("requests.post") as mock_post:
+        with patch("app.http_client.post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 429
             mock_resp.headers = {"Retry-After": "45"}
@@ -481,7 +481,7 @@ def test_retry_matrix_and_rate_limiting(client, mock_supabase, mock_embed):
                 assert cursor.fetchone()[0] == 0
 
         # 2. Transient failures (502, 503, 504) retry at most once
-        with patch("requests.post") as mock_post:
+        with patch("app.http_client.post") as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 503
             mock_post.return_value = mock_resp

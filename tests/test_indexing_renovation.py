@@ -210,7 +210,7 @@ def test_idempotency_deduplication(temp_repo):
     assert len(hashes) == len(set(hashes))
 
 # 4. EMBEDDINGS AND INSERTS BATCHING
-@patch("requests.post")
+@patch("indexer.http_client.post")
 def test_batch_embeddings_and_retries(mock_post, temp_repo):
     indexer = CodeIndexer(repos_path=temp_repo, repo_name="test_batch_embeddings")
     

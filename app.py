@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import supabase
 import os
-import sys
 import json
 import re
 import subprocess
@@ -51,16 +50,6 @@ _http_adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=
 http_client.mount("https://", _http_adapter)
 http_client.mount("http://", _http_adapter)
 
-# Under pytest, redirect the session's post() through a dynamic wrapper so that
-# `patch("requests.post")` in the test suite intercepts all calls made through
-# the connection-pooled client without changing production behaviour.
-# A direct bind (http_client.post = requests.post) captures the original
-# function object once and is immune to later patching, so we use a wrapper
-# that looks up requests.post at call time instead.
-if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
-    def _test_post(*args, **kwargs):  # noqa: E306
-        return requests.post(*args, **kwargs)
-    http_client.post = _test_post  # type: ignore[method-assign]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
