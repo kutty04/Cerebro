@@ -1,10 +1,14 @@
 import os
 import re
+import time
 import socket
+import signal
+import sys
+import subprocess
 import ipaddress
 import urllib.parse
-from dataclasses import dataclass
-from typing import Optional, Tuple, Set, List
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, Set, List, Dict
 import logging
 from fastapi import HTTPException, status
 
@@ -24,6 +28,12 @@ class IngestionLimits:
     MAX_PATH_LENGTH: int = int(os.getenv("MAX_PATH_LENGTH", "250"))
     MAX_REPO_URL_LENGTH: int = int(os.getenv("MAX_REPO_URL_LENGTH", "500"))
     MAX_CONCURRENT_JOBS: int = int(os.getenv("MAX_CONCURRENT_JOBS", "3"))
+    # Rate Limits
+    MAX_USER_INGESTIONS_PER_WINDOW: int = int(os.getenv("MAX_USER_INGESTIONS_PER_WINDOW", "5"))
+    USER_WINDOW_SECONDS: int = int(os.getenv("USER_WINDOW_SECONDS", "3600"))  # 1 hour
+    MAX_GLOBAL_INGESTIONS_PER_WINDOW: int = int(os.getenv("MAX_GLOBAL_INGESTIONS_PER_WINDOW", "20"))
+    GLOBAL_WINDOW_SECONDS: int = int(os.getenv("GLOBAL_WINDOW_SECONDS", "3600"))  # 1 hour
+    MAX_RATE_LIMITER_MAP_SIZE: int = int(os.getenv("MAX_RATE_LIMITER_MAP_SIZE", "10000"))
 
 
 class IngestionConcurrencyManager:
@@ -54,9 +64,88 @@ class IngestionConcurrencyManager:
         self.active_jobs.discard(job_key)
 
 
-# Global singleton instance of limits and concurrency manager
+class IngestionRateLimiter:
+    """
+    Fixed-window rate limiter with memory bounds, lazy eviction, and Retry-After calculation.
+    Tracks ingestion attempts per user_id and globally.
+    """
+    def __init__(self, limits: IngestionLimits):
+        self.limits = limits
+        self.user_records: Dict[str, List[float]] = {}
+        self.global_records: List[float] = []
+
+    def _cleanup_expired(self, now: float):
+        # Clean global records
+        cutoff_global = now - self.limits.GLOBAL_WINDOW_SECONDS
+        self.global_records = [t for t in self.global_records if t > cutoff_global]
+
+        # Clean user records
+        cutoff_user = now - self.limits.USER_WINDOW_SECONDS
+        expired_users = []
+        for user_id, timestamps in self.user_records.items():
+            valid_timestamps = [t for t in timestamps if t > cutoff_user]
+            if valid_timestamps:
+                self.user_records[user_id] = valid_timestamps
+            else:
+                expired_users.append(user_id)
+
+        for user_id in expired_users:
+            del self.user_records[user_id]
+
+        # Evict oldest entries if map exceeds maximum bounds
+        if len(self.user_records) > self.limits.MAX_RATE_LIMITER_MAP_SIZE:
+            sorted_users = sorted(
+                self.user_records.items(),
+                key=lambda item: item[1][0] if item[1] else 0
+            )
+            excess = len(self.user_records) - self.limits.MAX_RATE_LIMITER_MAP_SIZE
+            for u_id, _ in sorted_users[:excess]:
+                del self.user_records[u_id]
+
+    def check_and_record(self, user_id: str):
+        now = time.time()
+
+        # 1. Check Global Rate Limit
+        cutoff_global = now - self.limits.GLOBAL_WINDOW_SECONDS
+        active_global_requests = [t for t in self.global_records if t > cutoff_global]
+
+        if len(active_global_requests) >= self.limits.MAX_GLOBAL_INGESTIONS_PER_WINDOW:
+            oldest = active_global_requests[0]
+            retry_after = int(max(1, cutoff_global - oldest + self.limits.GLOBAL_WINDOW_SECONDS))
+            logger.warning("Global ingestion rate limit exceeded [op=rate_limit_check]")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Global ingestion rate limit reached. Please wait before retrying.",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        # 2. Check Per-User Rate Limit
+        cutoff_user = now - self.limits.USER_WINDOW_SECONDS
+        user_requests = [t for t in self.user_records.get(user_id, []) if t > cutoff_user]
+
+        if len(user_requests) >= self.limits.MAX_USER_INGESTIONS_PER_WINDOW:
+            oldest = user_requests[0]
+            retry_after = int(max(1, cutoff_user - oldest + self.limits.USER_WINDOW_SECONDS))
+            logger.warning("User ingestion rate limit exceeded [op=rate_limit_check]")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Ingestion rate limit exceeded. Please wait before retrying.",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        # Record attempt
+        user_requests.append(now)
+        self.user_records[user_id] = user_requests
+        self.global_records.append(now)
+
+        # Cleanup expired & evict excess keys
+        self._cleanup_expired(now)
+
+
+# Global singleton instances
 DEFAULT_LIMITS = IngestionLimits()
 concurrency_manager = IngestionConcurrencyManager(DEFAULT_LIMITS)
+rate_limiter = IngestionRateLimiter(DEFAULT_LIMITS)
 
 
 def validate_and_normalize_github_url(url: str, limits: IngestionLimits = DEFAULT_LIMITS) -> str:
@@ -245,3 +334,116 @@ def validate_dns_ip_safety(hostname: str = "github.com", timeout_sec: float = 5.
         return False
     finally:
         socket.setdefaulttimeout(old_timeout)
+
+
+def get_dir_size_bytes(dir_path: str) -> int:
+    """
+    Recursively measures total disk usage in bytes for a directory, inclusive of .git metadata and all files.
+    """
+    total = 0
+    if not os.path.exists(dir_path):
+        return 0
+    for root, dirs, files in os.walk(dir_path):
+        for f in files:
+            fp = os.path.join(root, f)
+            if not os.path.islink(fp):
+                try:
+                    total += os.path.getsize(fp)
+                except OSError:
+                    pass
+    return total
+
+
+def terminate_process_tree(proc: subprocess.Popen):
+    """
+    Cross-platform process-tree termination adapter.
+    On Windows: uses `taskkill /F /T /PID`.
+    On Linux/Posix: kills process group via `os.killpg(SIGTERM)` followed by `SIGKILL`.
+    Always reaps process to prevent orphan/zombie processes.
+    """
+    if proc.poll() is not None:
+        return
+
+    pid = proc.pid
+    logger.info("Terminating process tree [op=terminate_proc_tree, pid=%d]", pid)
+
+    if sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=5)
+        except Exception as e:
+            logger.warning("Windows taskkill failed [op=terminate_proc_tree, exc_type=%s]", type(e).__name__)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    else:
+        try:
+            getpgid_func = getattr(os, "getpgid", None)
+            killpg_func = getattr(os, "killpg", None)
+            if getpgid_func and killpg_func:
+                pgid = getpgid_func(pid)
+                killpg_func(pgid, signal.SIGTERM)
+                time.sleep(0.5)
+                if proc.poll() is None:
+                    killpg_func(pgid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except Exception as e:
+            logger.warning("Linux killpg failed [op=terminate_proc_tree, exc_type=%s]", type(e).__name__)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
+def run_safe_git_clone(canonical_url: str, temp_dir: str, timeout_sec: int) -> int:
+    """
+    Executes git clone in a separate process session/group with timeout and process-tree cleanup.
+    Includes clone-time protections: --depth 1, --single-branch, --no-tags, --no-recurse-submodules.
+    Returns returncode (0 on success). Raises subprocess.TimeoutExpired on timeout.
+    """
+    env = os.environ.copy()
+    env["GIT_ALLOW_PROTOCOL"] = "https"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+
+    cmd = [
+        "git",
+        "-c", "http.followRedirects=false",
+        "-c", "core.symlinks=false",
+        "clone",
+        "--depth", "1",
+        "--single-branch",
+        "--no-tags",
+        "--no-recurse-submodules",
+        canonical_url,
+        temp_dir,
+    ]
+
+    kwargs = {
+        "env": env,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+    }
+
+    if sys.platform != "win32":
+        kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(cmd, **kwargs)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_sec)
+        return proc.returncode
+    except subprocess.TimeoutExpired:
+        logger.error("Git clone timed out [op=run_safe_git_clone, timeout=%d]", timeout_sec)
+        terminate_process_tree(proc)
+        raise
+    except Exception as e:
+        logger.error("Git clone process exception [op=run_safe_git_clone, exc_type=%s]", type(e).__name__)
+        terminate_process_tree(proc)
+        raise

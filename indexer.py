@@ -351,6 +351,10 @@ class CodeIndexer:
             except Exception as e:
                 self.failed_count += 1
                 logger.error("Failed to index snippet [op=index_snippets, exc_type=%s]", type(e).__name__)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to index code snippets into database.",
+                )
 
         logger.info(f"✅ Indexing complete!")
         logger.info(f"📊 Successfully indexed: {self.indexed_count}")

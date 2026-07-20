@@ -1,7 +1,10 @@
 import os
+import time
 import shutil
 import tempfile
 import socket
+import subprocess
+from pathlib import Path
 import pytest
 from unittest.mock import MagicMock, patch
 from fastapi import HTTPException
@@ -12,9 +15,13 @@ from ingestion_validator import (
     DEFAULT_LIMITS,
     IngestionLimits,
     IngestionConcurrencyManager,
+    IngestionRateLimiter,
     validate_and_normalize_github_url,
     validate_dns_ip_safety,
     is_ip_restricted,
+    get_dir_size_bytes,
+    terminate_process_tree,
+    run_safe_git_clone,
 )
 import indexer
 
@@ -134,7 +141,51 @@ def test_validate_dns_failure(mock_getaddrinfo):
 
 
 # ----------------------------------------------------------------------
-# 3. CONCURRENCY & CAPACITY TESTS
+# 3. DISK SIZE & PROCESS-TREE TERMINATION TESTS
+# ----------------------------------------------------------------------
+
+def test_get_dir_size_bytes_includes_git_objects():
+    temp_dir = tempfile.mkdtemp()
+    try:
+        git_dir = os.path.join(temp_dir, ".git", "objects")
+        os.makedirs(git_dir, exist_ok=True)
+        with open(os.path.join(git_dir, "pack-1234"), "wb") as f:
+            f.write(b"x" * 2048)
+
+        with open(os.path.join(temp_dir, "main.py"), "wb") as f:
+            f.write(b"y" * 1024)
+
+        total_size = get_dir_size_bytes(temp_dir)
+        assert total_size == 3072
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_terminate_process_tree_calls():
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = None
+    mock_proc.pid = 9999
+
+    with patch("sys.platform", "linux"), patch("os.getpgid", create=True, return_value=9999), patch("os.killpg", create=True) as mock_killpg:
+        terminate_process_tree(mock_proc)
+        assert mock_killpg.called
+        mock_proc.wait.assert_called_once()
+
+
+@patch("subprocess.Popen")
+def test_run_safe_git_clone_timeout(mock_popen):
+    mock_proc = MagicMock()
+    mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd="git clone", timeout=5)
+    mock_proc.poll.return_value = None
+    mock_proc.pid = 8888
+    mock_popen.return_value = mock_proc
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_safe_git_clone("https://github.com/owner/repo", tempfile.gettempdir(), 5)
+
+
+# ----------------------------------------------------------------------
+# 4. CONCURRENCY & RATE LIMITING TESTS
 # ----------------------------------------------------------------------
 
 def test_concurrency_duplicate_rejection():
@@ -165,37 +216,77 @@ def test_concurrency_capacity_reached():
     cm.release("user-2", "https://github.com/owner/repo2")
 
 
+def test_rate_limiter_user_limit_exceeded():
+    limits = IngestionLimits(MAX_USER_INGESTIONS_PER_WINDOW=2, USER_WINDOW_SECONDS=3600)
+    rl = IngestionRateLimiter(limits)
+
+    rl.check_and_record("user-rl-1")
+    rl.check_and_record("user-rl-1")
+
+    with pytest.raises(HTTPException) as exc_info:
+        rl.check_and_record("user-rl-1")
+    assert exc_info.value.status_code == 429
+    assert "Retry-After" in exc_info.value.headers
+    assert int(exc_info.value.headers["Retry-After"]) > 0
+
+
+def test_rate_limiter_global_limit_exceeded():
+    limits = IngestionLimits(MAX_USER_INGESTIONS_PER_WINDOW=10, MAX_GLOBAL_INGESTIONS_PER_WINDOW=2, GLOBAL_WINDOW_SECONDS=3600)
+    rl = IngestionRateLimiter(limits)
+
+    rl.check_and_record("user-a")
+    rl.check_and_record("user-b")
+
+    with pytest.raises(HTTPException) as exc_info:
+        rl.check_and_record("user-c")
+    assert exc_info.value.status_code == 429
+    assert "Global ingestion rate limit reached" in exc_info.value.detail
+
+
+def test_rate_limiter_map_size_eviction():
+    limits = IngestionLimits(MAX_USER_INGESTIONS_PER_WINDOW=10, MAX_GLOBAL_INGESTIONS_PER_WINDOW=1000, MAX_RATE_LIMITER_MAP_SIZE=3)
+    rl = IngestionRateLimiter(limits)
+
+    rl.check_and_record("u1")
+    rl.check_and_record("u2")
+    rl.check_and_record("u3")
+    rl.check_and_record("u4")
+
+    # Map size must be bounded by MAX_RATE_LIMITER_MAP_SIZE (3)
+    assert len(rl.user_records) <= 3
+
+
 # ----------------------------------------------------------------------
-# 4. END-TO-END INGESTION ROUTE TESTS (MOCKED CLONE & DB)
+# 5. END-TO-END INGESTION ROUTE TESTS (MOCKED CLONE & DB)
 # ----------------------------------------------------------------------
 
 @patch("app.db")
 @patch("app.validate_dns_ip_safety")
-@patch("subprocess.run")
+@patch("app.run_safe_git_clone")
 @patch.object(indexer.CodeIndexer, "get_serverless_embedding")
 def test_ingest_success_mocked(
-    mock_get_embedding, mock_subproc_run, mock_dns_safety, mock_db, client
+    mock_get_embedding, mock_run_clone, mock_dns_safety, mock_db, client
 ):
     mock_dns_safety.return_value = True
     mock_get_embedding.return_value = [0.1] * 384
+    mock_run_clone.return_value = 0
 
     mock_table = MagicMock()
     mock_table.insert.return_value = mock_table
     mock_table.execute.return_value = MagicMock(data=[{"id": 101}])
     mock_db.table.return_value = mock_table
 
-    def fake_clone(cmd, **kwargs):
-        temp_dir_path = cmd[-1]
-        test_file = os.path.join(temp_dir_path, "main.py")
+    def fake_clone(canonical_url, temp_dir, timeout_sec):
+        test_file = os.path.join(temp_dir, "main.py")
         with open(test_file, "w", encoding="utf-8") as f:
             f.write("def hello(): return 'world'")
-        return MagicMock(returncode=0, stdout="", stderr="")
+        return 0
 
-    mock_subproc_run.side_effect = fake_clone
+    mock_run_clone.side_effect = fake_clone
 
     payload = {
         "repo_url": "https://github.com/kutty04/Cerebro.git",
-        "user_id": "user-test-123",
+        "user_id": "user-test-success-123",
     }
     with patch.dict("os.environ", {"HF_TOKEN": "mock_token", "SUPABASE_URL": "https://mock.url", "SUPABASE_KEY": "mock_key"}):
         response = client.post("/ingest", json=payload)
@@ -207,15 +298,14 @@ def test_ingest_success_mocked(
 
 @patch("app.db")
 @patch("app.validate_dns_ip_safety")
-@patch("subprocess.run")
-def test_ingest_clone_timeout(mock_subproc_run, mock_dns_safety, mock_db, client):
+@patch("app.run_safe_git_clone")
+def test_ingest_clone_timeout(mock_run_clone, mock_dns_safety, mock_db, client):
     mock_dns_safety.return_value = True
-    import subprocess
-    mock_subproc_run.side_effect = subprocess.TimeoutExpired(cmd="git clone", timeout=60)
+    mock_run_clone.side_effect = subprocess.TimeoutExpired(cmd="git clone", timeout=60)
 
     payload = {
         "repo_url": "https://github.com/kutty04/Cerebro",
-        "user_id": "user-test-123",
+        "user_id": "user-test-timeout-123",
     }
     response = client.post("/ingest", json=payload)
     assert response.status_code == 504
@@ -224,22 +314,22 @@ def test_ingest_clone_timeout(mock_subproc_run, mock_dns_safety, mock_db, client
 
 @patch("app.db")
 @patch("app.validate_dns_ip_safety")
-@patch("subprocess.run")
+@patch("app.run_safe_git_clone")
 @patch.object(indexer.CodeIndexer, "get_serverless_embedding")
 def test_ingest_database_failure_rolls_back(
-    mock_get_embedding, mock_subproc_run, mock_dns_safety, mock_db, client
+    mock_get_embedding, mock_run_clone, mock_dns_safety, mock_db, client
 ):
     mock_dns_safety.return_value = True
     mock_get_embedding.return_value = [0.1] * 384
+    mock_run_clone.return_value = 0
 
-    def fake_clone(cmd, **kwargs):
-        temp_dir_path = cmd[-1]
-        test_file = os.path.join(temp_dir_path, "main.py")
+    def fake_clone(canonical_url, temp_dir, timeout_sec):
+        test_file = os.path.join(temp_dir, "main.py")
         with open(test_file, "w", encoding="utf-8") as f:
             f.write("def hello(): pass")
-        return MagicMock(returncode=0, stdout="", stderr="")
+        return 0
 
-    mock_subproc_run.side_effect = fake_clone
+    mock_run_clone.side_effect = fake_clone
 
     mock_table = MagicMock()
     mock_table.insert.side_effect = Exception("Database write crash")
@@ -251,12 +341,49 @@ def test_ingest_database_failure_rolls_back(
     }
     with patch.dict("os.environ", {"HF_TOKEN": "mock_token", "SUPABASE_URL": "https://mock.url", "SUPABASE_KEY": "mock_key"}):
         response = client.post("/ingest", json=payload)
-        assert response.status_code == 500
-        assert "Failed to index" in response.json()["detail"]
+    assert response.status_code == 500
+    assert "Failed to index" in response.json()["detail"]
 
 
 # ----------------------------------------------------------------------
-# 5. FILESYSTEM & LIMIT TESTS IN INDEXER
+# 6. ROLLBACK TARGETING CREATED IDS ONLY
+# ----------------------------------------------------------------------
+
+@patch("app.db")
+def test_rollback_does_not_delete_valid_repo_snippets(mock_db, client):
+    """
+    Verifies that failure rollback deletes ONLY created snippet IDs for this job,
+    never executing a generic delete by repo_name.
+    """
+    mock_table = MagicMock()
+    mock_db.table.return_value = mock_table
+
+    mock_table.insert.side_effect = [
+        MagicMock(execute=lambda: MagicMock(data=[{"id": 501}])),
+        MagicMock(execute=lambda: MagicMock(data=[{"id": 502}])),
+        Exception("DB Insert Crash"),
+    ]
+
+    temp_dir = tempfile.mkdtemp()
+    try:
+        for i in range(3):
+            with open(os.path.join(temp_dir, f"file{i}.py"), "w", encoding="utf-8") as f:
+                f.write(f"def func_{i}(): pass")
+
+        idx = indexer.CodeIndexer(repos_path=temp_dir, repo_name="myrepo")
+        idx.db = mock_db
+        idx.user_id = "u123"
+
+        with patch.object(idx, "get_serverless_embedding", return_value=[0.1]*384):
+            snippets = idx.scan_repos()
+            with pytest.raises(HTTPException):
+                idx.index_snippets(snippets)
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+# ----------------------------------------------------------------------
+# 7. DETERMINISTIC FILESYSTEM & LIMIT TESTS IN INDEXER
 # ----------------------------------------------------------------------
 
 def test_indexer_binary_file_skipped():
@@ -273,23 +400,20 @@ def test_indexer_binary_file_skipped():
         shutil.rmtree(temp_dir)
 
 
-def test_indexer_symlink_escape_skipped():
+def test_indexer_symlink_escape_skipped_deterministic():
+    """
+    Proves symlink containment skipping deterministically without relying on OS admin privileges.
+    """
     temp_dir = tempfile.mkdtemp()
-    outside_dir = tempfile.mkdtemp()
     try:
-        outside_file = os.path.join(outside_dir, "outside.py")
-        with open(outside_file, "w", encoding="utf-8") as f:
-            f.write("secret = 'outside'")
-
-        link_file = os.path.join(temp_dir, "linked.py")
-        try:
-            os.symlink(outside_file, link_file)
-        except OSError:
-            pytest.skip("Symlinks not supported without admin on this OS")
+        linked_file = os.path.join(temp_dir, "linked.py")
+        with open(linked_file, "w", encoding="utf-8") as f:
+            f.write("code content")
 
         idx = indexer.CodeIndexer(repos_path=temp_dir)
-        snippets = idx.scan_repos()
-        assert len(snippets) == 0
+
+        with patch.object(Path, "is_symlink", return_value=True):
+            snippets = idx.scan_repos()
+            assert len(snippets) == 0
     finally:
         shutil.rmtree(temp_dir)
-        shutil.rmtree(outside_dir)

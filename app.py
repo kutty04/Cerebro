@@ -28,8 +28,11 @@ from telemetry import (
 from ingestion_validator import (
     DEFAULT_LIMITS,
     concurrency_manager,
+    rate_limiter,
     validate_and_normalize_github_url,
     validate_dns_ip_safety,
+    get_dir_size_bytes,
+    run_safe_git_clone,
 )
 
 load_dotenv(override=True)
@@ -566,14 +569,17 @@ async def ingest_repo(request: IngestRequest):
     # Step 1: URL validation & canonical normalization
     canonical_url = validate_and_normalize_github_url(request.repo_url)
 
-    # Step 2: DNS resolution & SSRF IP safety check
+    # Step 2: Rate limit check (user_id & global rate window)
+    rate_limiter.check_and_record(request.user_id)
+
+    # Step 3: DNS resolution & SSRF IP safety check
     if not validate_dns_ip_safety("github.com"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Repository network destination is unreachable or restricted.",
         )
 
-    # Step 3: Concurrency check & lock acquisition
+    # Step 4: Concurrency check & lock acquisition
     concurrency_manager.acquire(request.user_id, canonical_url)
 
     temp_dir = tempfile.mkdtemp(prefix="cerebro_ingest_")
@@ -583,34 +589,11 @@ async def ingest_repo(request: IngestRequest):
     try:
         logger.info(f"🚀 Ingesting repo: {canonical_url} for user: {request.user_id}")
 
-        # Step 4: Safe subprocess git clone (depth 1, single branch, submodules disabled, redirects blocked)
-        env = os.environ.copy()
-        env["GIT_ALLOW_PROTOCOL"] = "https"
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        env["GIT_CONFIG_NOSYSTEM"] = "1"
-
-        cmd = [
-            "git",
-            "-c", "http.followRedirects=false",
-            "-c", "core.symlinks=false",
-            "clone",
-            "--depth", "1",
-            "--no-recurse-submodules",
-            "--single-branch",
-            canonical_url,
-            temp_dir,
-        ]
-
+        # Step 5: Safe process-tree subprocess git clone (depth 1, single branch, no tags, submodules disabled, redirects blocked)
         try:
-            clone_res = subprocess.run(
-                cmd,
-                env=env,
-                timeout=DEFAULT_LIMITS.MAX_REPO_CLONE_TIMEOUT_SEC,
-                capture_output=True,
-                text=True,
-            )
-            if clone_res.returncode != 0:
-                logger.error("Git clone returned non-zero exit code [op=ingest_clone]")
+            returncode = run_safe_git_clone(canonical_url, temp_dir, DEFAULT_LIMITS.MAX_REPO_CLONE_TIMEOUT_SEC)
+            if returncode != 0:
+                logger.error("Git clone returned non-zero exit code [op=ingest_clone, code=%d]", returncode)
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Repository inaccessible, private, or not found.",
@@ -622,26 +605,24 @@ async def ingest_repo(request: IngestRequest):
                 detail="Repository clone timed out.",
             )
 
-        # Step 5: Disk size pre-scan check
+        # Step 6: Post-clone disk size check (including .git objects & hidden files)
         try:
-            total_disk_bytes = sum(
-                f.stat().st_size for f in Path(temp_dir).rglob("*") if f.is_file() and not f.is_symlink()
-            )
+            total_disk_bytes = get_dir_size_bytes(temp_dir)
             if total_disk_bytes > DEFAULT_LIMITS.MAX_REPO_DISK_SIZE_BYTES:
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail="Repository exceeds maximum disk size limit (50MB).",
+                    detail="Repository exceeds maximum disk size limit (50MB). Consider narrowing scope.",
                 )
         except HTTPException:
             raise
         except Exception as disk_e:
-            logger.error("Disk pre-scan check failed [op=ingest_disk_scan, exc_type=%s]", type(disk_e).__name__)
+            logger.error("Disk size check failed [op=ingest_disk_scan, exc_type=%s]", type(disk_e).__name__)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to inspect repository filesystem.",
             )
 
-        # Step 6: Initialize Indexer and scan files
+        # Step 7: Initialize Indexer and scan files
         indexer = CodeIndexer(repos_path=temp_dir, repo_url=canonical_url, repo_name=repo_name, limits=DEFAULT_LIMITS)
         indexer.db = db
         indexer.user_id = request.user_id
@@ -654,7 +635,7 @@ async def ingest_repo(request: IngestRequest):
                 "indexed_count": 0,
             }
 
-        # Step 7: Index snippets & record inserted IDs
+        # Step 8: Index snippets & record inserted IDs
         inserted_snippet_ids = indexer.index_snippets(snippets)
 
         return {
@@ -664,11 +645,11 @@ async def ingest_repo(request: IngestRequest):
         }
 
     except HTTPException:
-        # Rollback database inserts on HTTP exception failure
+        # Rollback database inserts on HTTP exception failure (strictly targeting created IDs)
         if inserted_snippet_ids and db:
             try:
                 db.table("code_snippets").delete().in_("id", inserted_snippet_ids).execute()
-                logger.info("Rolled back partially inserted snippet records [op=ingest_rollback]")
+                logger.info("Rolled back partially inserted snippet records [op=ingest_rollback, count=%d]", len(inserted_snippet_ids))
             except Exception as rb_e:
                 logger.error("Database rollback failed [op=ingest_rollback, exc_type=%s]", type(rb_e).__name__)
         raise
@@ -684,7 +665,7 @@ async def ingest_repo(request: IngestRequest):
             detail="Ingestion failed due to an internal error.",
         )
     finally:
-        # Step 8: Always release concurrency lock & clean temporary directory
+        # Step 9: Always release concurrency lock & clean temporary directory
         concurrency_manager.release(request.user_id, canonical_url)
 
         def onerror(func, path, exc_info):
