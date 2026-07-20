@@ -1,31 +1,35 @@
 import React, { useState } from 'react';
 import { supabase } from '../supabaseClient';
 import { BrainCircuit, Mail, Lock, UserPlus, LogIn, GitBranch } from 'lucide-react';
+
 import './Auth.css';
 
-export default function Auth() {
-  const [loading, setLoading] = useState(false);
-  const [email, setEmail] = useState('');
+export default function Auth({ onClose, dialogTitleId }) {
+  const [loading, setLoading]   = useState(false);
+  const [email, setEmail]       = useState('');
   const [password, setPassword] = useState('');
   const [isSignUp, setIsSignUp] = useState(false);
-  const [message, setMessage] = useState(null);
+  const [message, setMessage]   = useState(null);   // { type: 'success'|'error', text: string }
+
+  const errorId = 'auth-error-msg';
 
   const handleAuth = async (e) => {
     e.preventDefault();
     setLoading(true);
     setMessage(null);
-    
     try {
       if (isSignUp) {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
-        setMessage({ type: 'success', text: 'Check your email for the confirmation link!' });
+        setMessage({ type: 'success', text: 'Check your email for a confirmation link.' });
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
+        // Session will be picked up by onAuthStateChange → App will re-render
       }
-    } catch (error) {
-      setMessage({ type: 'error', text: error.message });
+    } catch (err) {
+      // Only expose the message Supabase gives (user-safe, not credentials)
+      setMessage({ type: 'error', text: err.message || 'Authentication failed. Please try again.' });
     } finally {
       setLoading(false);
     }
@@ -35,73 +39,117 @@ export default function Auth() {
     try {
       const { error } = await supabase.auth.signInWithOAuth({ provider: 'github' });
       if (error) throw error;
-    } catch (error) {
-      setMessage({ type: 'error', text: error.message });
+    } catch (err) {
+      setMessage({ type: 'error', text: err.message || 'GitHub sign-in failed. Please try again.' });
     }
   };
 
   return (
-    <div className="auth-container">
-      <div className="neural-grid"></div>
-      <div className="auth-card">
-        <div className="auth-header">
-          <div className="brain-icon-wrapper scanning">
-            <BrainCircuit size={48} className="brain-icon" />
-          </div>
-          <h1>CEREBRO</h1>
-          <p>{isSignUp ? 'Create your neural profile' : 'Reconnect to the neural link'}</p>
+    <div className="auth-card">
+      {/* Header */}
+      <div className="auth-header">
+        <BrainCircuit size={36} className="auth-brain-icon" aria-hidden="true" />
+        <h2 id={dialogTitleId} className="auth-title">
+          {isSignUp ? 'Create your account' : 'Sign in to Cerebro'}
+        </h2>
+        <p className="auth-subtitle">
+          {isSignUp
+            ? 'Start indexing and querying your codebase.'
+            : 'Access your indexed repositories and code intelligence.'}
+        </p>
+      </div>
+
+      {/* GitHub OAuth — primary */}
+      <button
+        type="button"
+        className="auth-github-btn"
+        onClick={handleGitHubLogin}
+        disabled={loading}
+      >
+        <GitBranch size={18} aria-hidden="true" />
+
+        Continue with GitHub
+      </button>
+
+      <div className="auth-divider" role="separator" aria-label="or sign in with email">
+        <span>or</span>
+      </div>
+
+      {/* Email / password form */}
+      <form onSubmit={handleAuth} className="auth-form" noValidate>
+        <div className="auth-field">
+          <label htmlFor="auth-email" className="auth-label">
+            <Mail size={14} aria-hidden="true" />
+            Email address
+          </label>
+          <input
+            id="auth-email"
+            type="email"
+            className="auth-input"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            autoComplete={isSignUp ? 'email' : 'username'}
+            required
+            disabled={loading}
+            aria-describedby={message?.type === 'error' ? errorId : undefined}
+          />
         </div>
 
-        <form onSubmit={handleAuth} className="auth-form">
-          <div className="input-group">
-            <Mail className="input-icon" size={18} />
-            <input
-              type="email"
-              placeholder="Email Address"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-            />
-          </div>
-          <div className="input-group">
-            <Lock className="input-icon" size={18} />
-            <input
-              type="password"
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
-          </div>
-
-          <button type="submit" disabled={loading} className="auth-button">
-            {loading ? 'Processing...' : isSignUp ? (
-              <><UserPlus size={18} /> Initialize Account</>
-            ) : (
-              <><LogIn size={18} /> Connect Link</>
-            )}
-          </button>
-        </form>
-
-        <div className="auth-divider">
-          <span>OR</span>
+        <div className="auth-field">
+          <label htmlFor="auth-password" className="auth-label">
+            <Lock size={14} aria-hidden="true" />
+            Password
+          </label>
+          <input
+            id="auth-password"
+            type="password"
+            className="auth-input"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete={isSignUp ? 'new-password' : 'current-password'}
+            required
+            disabled={loading}
+            minLength={isSignUp ? 6 : undefined}
+          />
         </div>
 
-        <button onClick={handleGitHubLogin} className="github-button">
-          <GitBranch size={18} /> Continue with GitHub
+        <button
+          type="submit"
+          className="auth-submit-btn"
+          disabled={loading || !email || !password}
+        >
+          {loading
+            ? 'Processing…'
+            : isSignUp
+              ? <><UserPlus size={16} aria-hidden="true" /> Create account</>
+              : <><LogIn size={16} aria-hidden="true" /> Sign in</>
+          }
         </button>
+      </form>
 
-        {message && (
-          <div className={`auth-message ${message.type}`}>
-            {message.text}
-          </div>
-        )}
-
-        <div className="auth-footer">
-          <button onClick={() => setIsSignUp(!isSignUp)}>
-            {isSignUp ? 'Already have a profile? Sign In' : 'New mutant? Create a profile'}
-          </button>
+      {/* Message */}
+      {message && (
+        <div
+          id={errorId}
+          className={`auth-message auth-message--${message.type}`}
+          role={message.type === 'error' ? 'alert' : 'status'}
+          aria-live={message.type === 'error' ? 'assertive' : 'polite'}
+        >
+          {message.text}
         </div>
+      )}
+
+      {/* Toggle */}
+      <div className="auth-toggle">
+        <button
+          type="button"
+          className="auth-toggle-btn"
+          onClick={() => { setIsSignUp(!isSignUp); setMessage(null); }}
+        >
+          {isSignUp
+            ? 'Already have an account? Sign in'
+            : "Don't have an account? Create one"}
+        </button>
       </div>
     </div>
   );

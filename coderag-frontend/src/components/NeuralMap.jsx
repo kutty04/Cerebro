@@ -1,79 +1,176 @@
-import React, { useState, useEffect, useRef } from 'react';
-import ForceGraph2D from 'react-force-graph-2d';
-import { Activity, Maximize2 } from 'lucide-react';
-import { apiFetch } from '../apiClient';
+import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
+import { Maximize2, Table2, Share2, AlertTriangle } from 'lucide-react';
+import { fetchGraphData } from '../services';
 
-export default function NeuralMap({ user }) {
+/* react-force-graph-2d is chunked separately */
+const ForceGraph2D = lazy(() => import('react-force-graph-2d'));
+
+export default function NeuralMap({ userId }) {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState(null);
+  const [viewMode, setViewMode]   = useState('graph'); // 'graph' | 'table'
   const fgRef = useRef();
 
-  const fetchGraphData = async () => {
+  useEffect(() => {
     setLoading(true);
-    try {
-      const res = await apiFetch('/graph-data');
-      if (!res.ok) throw new Error('Graph data endpoint error.');
-      const data = await res.json();
-      setGraphData(data);
-    } catch (err) {
-      console.error('Failed to fetch graph data:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+    setError(null);
+    fetchGraphData()
+      .then((data) => {
+        setGraphData(data);
+        setLoading(false);
+      })
+      .catch((err) => {
+        setError(err.message);
+        setLoading(false);
+      });
+  }, [userId]);
 
   useEffect(() => {
-    fetchGraphData();
-  }, [user.id]);
-
-  useEffect(() => {
-    if (!loading && fgRef.current) {
-        setTimeout(() => {
-            fgRef.current.zoomToFit(400);
-        }, 500);
+    if (!loading && fgRef.current && viewMode === 'graph') {
+      const t = setTimeout(() => fgRef.current?.zoomToFit(400), 500);
+      return () => clearTimeout(t);
     }
-  }, [loading]);
+  }, [loading, viewMode]);
 
-  if (loading) {
-    return (
-      <div className="loading-state" style={{ height: '500px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Activity className="spin" /> Mapping Neural Network...
-      </div>
-    );
-  }
+  const isEmpty = !loading && !error && graphData.nodes.length === 0;
 
   return (
-    <div className="neural-map-container" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <div className="view-header">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <h2>Neural Map</h2>
-            <p>A semantic visualization of your indexed knowledge graph.</p>
+    <section className="neural-map-section" aria-labelledby="neural-map-heading">
+      {/* Header */}
+      <div className="neural-map-header">
+        <div>
+          <h1 id="neural-map-heading" className="panel-title">Knowledge Map</h1>
+          <p className="panel-subtitle">
+            Repository-to-file index relationships for your indexed code.
+            This graph shows which files belong to which indexed repository.
+          </p>
+        </div>
+        <div className="neural-map-actions">
+          {/* View toggle */}
+          <div className="nm-view-toggle" role="group" aria-label="Map view mode">
+            <button
+              type="button"
+              className={`nm-toggle-btn ${viewMode === 'graph' ? 'nm-toggle-btn--active' : ''}`}
+              aria-pressed={viewMode === 'graph'}
+              onClick={() => setViewMode('graph')}
+              aria-label="Show graph view"
+            >
+              <Share2 size={14} aria-hidden="true" />
+              Graph
+            </button>
+            <button
+              type="button"
+              className={`nm-toggle-btn ${viewMode === 'table' ? 'nm-toggle-btn--active' : ''}`}
+              aria-pressed={viewMode === 'table'}
+              onClick={() => setViewMode('table')}
+              aria-label="Show table view (accessible fallback)"
+            >
+              <Table2 size={14} aria-hidden="true" />
+              Table
+            </button>
           </div>
-          <button 
-            onClick={() => fgRef.current && fgRef.current.zoomToFit(400)}
-            className="ingest-nav-btn"
-            style={{ height: 'fit-content' }}
-          >
-            <Maximize2 size={14} /> Center View
-          </button>
+
+          {viewMode === 'graph' && fgRef.current && (
+            <button
+              type="button"
+              className="btn-ghost nm-center-btn"
+              onClick={() => fgRef.current?.zoomToFit(400)}
+              aria-label="Center and fit the graph to the viewport"
+            >
+              <Maximize2 size={14} aria-hidden="true" />
+              Center view
+            </button>
+          )}
         </div>
       </div>
 
-      <div style={{ flex: 1, position: 'relative', background: 'rgba(15, 23, 42, 0.6)', borderRadius: '16px', border: '1px solid rgba(255,255,255,0.05)', overflow: 'hidden', minHeight: '450px' }}>
-        <ForceGraph2D
-          ref={fgRef}
-          graphData={graphData}
-          nodeLabel="name"
-          nodeColor={node => node.color || '#38bdf8'}
-          nodeVal={node => node.val || 5}
-          linkColor={() => 'rgba(56, 189, 248, 0.2)'}
-          linkWidth={1.5}
-          backgroundColor="transparent"
-          enableNodeDrag={true}
-          enableZoom={true}
-        />
-      </div>
-    </div>
+      {/* Loading */}
+      {loading && (
+        <div className="loading-panel" role="status" aria-live="polite">
+          <div className="loading-spinner" aria-hidden="true" />
+          <span>Loading knowledge map…</span>
+        </div>
+      )}
+
+      {/* Error */}
+      {!loading && error && (
+        <div className="error-card" role="alert">
+          <AlertTriangle size={18} aria-hidden="true" />
+          <div>
+            <p className="error-card-msg">{error}</p>
+            <p className="error-card-hint">The knowledge map could not be loaded.</p>
+          </div>
+        </div>
+      )}
+
+      {/* Empty */}
+      {isEmpty && (
+        <div className="empty-state">
+          <Share2 size={36} className="empty-icon" aria-hidden="true" />
+          <h2 className="empty-title">No graph data available</h2>
+          <p className="empty-desc">
+            Index a repository first. Once indexed, the file-to-repository
+            relationships will appear here.
+          </p>
+        </div>
+      )}
+
+      {/* Graph view */}
+      {!loading && !error && !isEmpty && viewMode === 'graph' && (
+        <div className="nm-graph-container" aria-label="Repository-to-file knowledge graph. Use Table view for an accessible alternative.">
+          <Suspense fallback={
+            <div className="loading-panel" role="status">
+              <div className="loading-spinner" aria-hidden="true" />
+              <span>Loading graph renderer…</span>
+            </div>
+          }>
+            <ForceGraph2D
+              ref={fgRef}
+              graphData={graphData}
+              nodeLabel="name"
+              nodeColor={(node) => node.color || '#38bdf8'}
+              nodeVal={(node) => node.val || 5}
+              linkColor={() => 'rgba(56, 189, 248, 0.2)'}
+              linkWidth={1.5}
+              backgroundColor="transparent"
+              enableNodeDrag={true}
+              enableZoom={true}
+            />
+          </Suspense>
+        </div>
+      )}
+
+      {/* Table view (accessible fallback) */}
+      {!loading && !error && !isEmpty && viewMode === 'table' && (
+        <div className="nm-table-wrapper">
+          <table className="nm-table" aria-label="Repository-to-file index relationships">
+            <caption className="nm-table-caption">
+              Indexed files by repository. Each row represents an indexed file node.
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">File / Node</th>
+                <th scope="col">Repository (group)</th>
+                <th scope="col">Type</th>
+              </tr>
+            </thead>
+            <tbody>
+              {graphData.nodes.map((node, idx) => (
+                <tr key={node.id ?? idx}>
+                  <td className="nm-cell-name">{node.name ?? node.id ?? `Node ${idx + 1}`}</td>
+                  <td className="nm-cell-group">{node.group ?? '—'}</td>
+                  <td className="nm-cell-type">{node.type ?? 'file'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="nm-table-summary">
+            {graphData.nodes.length} nodes,{' '}
+            {graphData.links.length} relationships
+          </p>
+        </div>
+      )}
+    </section>
   );
 }
