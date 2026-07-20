@@ -2,42 +2,47 @@ import sqlite3
 import time
 import json
 import hashlib
+import logging
 from typing import List, Dict, Optional
 
 DB_PATH = "coderag_telemetry.db"
+logger = logging.getLogger(__name__)
 
 
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS search_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query TEXT,
-                repo_filter TEXT,
-                confidence INTEGER,
-                latency_ms REAL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS chat_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                thread_id TEXT,
-                query TEXT,
-                answer TEXT,
-                context_json TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS query_cache (
-                query_hash TEXT PRIMARY KEY,
-                answer TEXT,
-                sources_json TEXT,
-                confidence INTEGER,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS search_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query TEXT,
+                    repo_filter TEXT,
+                    confidence INTEGER,
+                    latency_ms REAL,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS chat_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT,
+                    query TEXT,
+                    answer TEXT,
+                    context_json TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS query_cache (
+                    query_hash TEXT PRIMARY KEY,
+                    answer TEXT,
+                    sources_json TEXT,
+                    confidence INTEGER,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+    except Exception as e:
+        logger.error("Telemetry database init failed [op=init_db, exc_type=%s]", type(e).__name__)
 
 
 def get_cache_key(query: str, repo_filter: Optional[str] = None, user_id: Optional[str] = None) -> str:
@@ -64,7 +69,7 @@ def get_cached_query(query: str, repo_filter: Optional[str] = None, user_id: Opt
                     "confidence": row["confidence"]
                 }
     except Exception as e:
-        print(f"Cache Read Error: {e}")
+        logger.error("Telemetry cache read failed [op=cache_read, exc_type=%s]", type(e).__name__)
     return None
 
 
@@ -76,7 +81,7 @@ def set_cached_query(query: str, repo_filter: Optional[str], answer: str, source
                 VALUES (?, ?, ?, ?)
             ''', (get_cache_key(query, repo_filter, user_id), answer, json.dumps(sources), confidence))
     except Exception as e:
-        print(f"Cache Write Error: {e}")
+        logger.error("Telemetry cache write failed [op=cache_write, exc_type=%s]", type(e).__name__)
 
 
 def log_search(query: str, repo_filter: Optional[str], confidence: int, latency_ms: float):
@@ -87,7 +92,7 @@ def log_search(query: str, repo_filter: Optional[str], confidence: int, latency_
                 VALUES (?, ?, ?, ?)
             ''', (query, str(repo_filter) if repo_filter else "ALL", confidence, latency_ms))
     except Exception as e:
-        print(f"Telemetry Error: {e}")
+        logger.error("Telemetry search logging failed [op=log_search, exc_type=%s]", type(e).__name__)
 
 
 def save_chat(thread_id: str, query: str, answer: str, sources: List[dict]):
@@ -98,7 +103,7 @@ def save_chat(thread_id: str, query: str, answer: str, sources: List[dict]):
                 VALUES (?, ?, ?, ?)
             ''', (thread_id, query, answer, json.dumps(sources)))
     except Exception as e:
-        print(f"Chat Save Error: {e}")
+        logger.error("Telemetry chat save failed [op=save_chat, exc_type=%s]", type(e).__name__)
 
 
 def get_analytics() -> Dict:
@@ -122,7 +127,7 @@ def get_analytics() -> Dict:
                 "recent_queries": recent
             }
     except Exception as e:
-        print(f"Analytics Error: {e}")
+        logger.error("Telemetry analytics fetch failed [op=get_analytics, exc_type=%s]", type(e).__name__)
         return {}
 
 
@@ -134,5 +139,5 @@ def get_chat_history() -> List[Dict]:
             cursor.execute("SELECT id, query, answer, timestamp FROM chat_history ORDER BY id DESC LIMIT 50")
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
-        print(f"History Error: {e}")
+        logger.error("Telemetry history fetch failed [op=get_chat_history, exc_type=%s]", type(e).__name__)
         return []

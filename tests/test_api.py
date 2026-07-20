@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
+import logging
 
 import app
 from app import app as fastapi_app
@@ -114,7 +115,6 @@ def test_search_user_scoped_rpc(mock_req_post, mock_get_embedding, mock_db, clie
         )
 
     assert response.status_code == 200
-    # Verify that db.rpc was called with p_user_id
     mock_db.rpc.assert_called_once_with(
         "search_code_snippets",
         {
@@ -129,8 +129,6 @@ def test_search_user_scoped_rpc(mock_req_post, mock_get_embedding, mock_db, clie
 @patch("app.get_embedding")
 def test_search_user_scoped_rpc_failure_fails_closed(mock_get_embedding, mock_db, client):
     mock_get_embedding.return_value = [0.1] * 384
-
-    # Make the user-scoped RPC call raise an exception (simulating missing RPC parameter in deployed DB)
     mock_db.rpc.side_effect = Exception("PGRST202: Could not find function search_code_snippets with p_user_id")
 
     with patch.dict("os.environ", {"HF_TOKEN": "mock_token"}):
@@ -139,12 +137,53 @@ def test_search_user_scoped_rpc_failure_fails_closed(mock_get_embedding, mock_db
             json={"query": "How do I run main?", "top_k": 5, "user_id": "user-abc"},
         )
 
-    # Must fail closed with 500 error and sanitized detail
     assert response.status_code == 500
     data = response.json()
     assert "user isolation query could not be executed safely" in data["detail"]
-    # Ensure raw database exception details / credentials are NOT exposed to client
     assert "PGRST202" not in data["detail"]
+
+
+@patch("app.db")
+@patch("app.get_embedding")
+def test_search_secret_bearing_exception_sanitization(mock_get_embedding, mock_db, caplog, client):
+    """
+    Regression Test: Proves that secret-bearing exception content (database URL, passwords, tokens)
+    does NOT leak into public API responses or server logs.
+    """
+    mock_get_embedding.return_value = [0.1] * 384
+
+    fake_secret_password = "SuperSecretPassword123!"
+    fake_db_url = "postgresql://admin:SuperSecretPassword123!@db.supabase.co:5432/postgres"
+    fake_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.SecretTokenContent"
+
+    fake_secret_exception = Exception(
+        f"Database driver crash connecting to {fake_db_url} with token={fake_token}"
+    )
+
+    mock_db.rpc.side_effect = fake_secret_exception
+
+    with caplog.at_level(logging.ERROR), patch.dict("os.environ", {"HF_TOKEN": "mock_token"}):
+        response = client.post(
+            "/search",
+            json={"query": "How do I connect?", "user_id": "user-secret-test"},
+        )
+
+    assert response.status_code == 500
+    response_text = response.text
+    log_text = caplog.text
+
+    # Assert secrets do NOT appear in API response
+    assert fake_secret_password not in response_text
+    assert fake_db_url not in response_text
+    assert fake_token not in response_text
+
+    # Assert secrets do NOT appear in captured server logs
+    assert fake_secret_password not in log_text
+    assert fake_db_url not in log_text
+    assert fake_token not in log_text
+
+    # Assert that sanitized structured log message WAS recorded instead
+    assert "User-scoped vector search RPC failed [op=search_user_rpc, exc_type=Exception]" in log_text
 
 
 @patch("app.db")

@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 import supabase
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import json
 import requests
 from dotenv import load_dotenv
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-REPOS_PATH = os.getenv("REPOS_PATH", "./coderag-data")  # Local folder with repos
+REPOS_PATH = os.getenv("REPOS_PATH", "./coderag-data")
 
 # File extensions to index
 CODE_EXTENSIONS = {
@@ -85,17 +85,15 @@ class CodeIndexer:
         logger.info("🚀 Initializing CodeIndexer...")
 
         try:
-            # Check HF Token
             if not os.getenv("HF_TOKEN"):
                 logger.error("❌ Missing HF_TOKEN environment variable for serverless embeddings")
                 return False
             logger.info("✅ Embedder configured (Serverless)")
         except Exception as e:
-            logger.error(f"❌ Failed to configure serverless embedder: {e}")
+            logger.error("Failed to configure serverless embedder [op=indexer_init, exc_type=%s]", type(e).__name__)
             return False
 
         try:
-            # Initialize Supabase
             if not SUPABASE_URL or not SUPABASE_KEY:
                 logger.error("❌ Missing SUPABASE_URL or SUPABASE_KEY environment variables")
                 return False
@@ -103,7 +101,7 @@ class CodeIndexer:
             self.db = supabase.create_client(SUPABASE_URL, SUPABASE_KEY)
             logger.info("✅ Supabase connected")
         except Exception as e:
-            logger.error(f"❌ Failed to connect to Supabase: {e}")
+            logger.error("Failed to connect to Supabase [op=indexer_init, exc_type=%s]", type(e).__name__)
             return False
 
         return True
@@ -114,10 +112,8 @@ class CodeIndexer:
 
     def should_skip_file(self, file_path: str) -> bool:
         """Check if file should be indexed"""
-        # Skip hidden files
         if any(part.startswith(".") for part in Path(file_path).parts):
             return True
-        # Skip if extension not in CODE_EXTENSIONS
         return Path(file_path).suffix.lower() not in CODE_EXTENSIONS
 
     def chunk_code(self, code: str, file_path: str, max_lines: int = 40) -> List[Tuple[str, int]]:
@@ -127,11 +123,10 @@ class CodeIndexer:
         """
         lines = code.split("\n")
         chunks = []
-        
+
         import re
-        # Regex to detect JS/Python functions, classes, and arrow functions
         def_pattern = re.compile(r'^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|def)\s+([a-zA-Z0-9_]+)\b|const\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>')
-        
+
         current_context = "Global Context"
 
         for i in range(0, len(lines), max_lines):
@@ -140,8 +135,7 @@ class CodeIndexer:
 
             if not raw_text.strip():
                 continue
-                
-            # Scan this chunk for any function/class signatures
+
             found_defs = []
             for line in chunk_lines:
                 match = def_pattern.search(line)
@@ -149,13 +143,11 @@ class CodeIndexer:
                     name = match.group(1) or match.group(2)
                     if name:
                         found_defs.append(name)
-                        current_context = name # Update running context for the next chunk if it overflows
-            
-            # Inject intelligent metadata directly into the text so the embedder learns it!
+                        current_context = name
+
             context_label = ", ".join(found_defs) if found_defs else f"Continued from {current_context}"
             metadata_header = f"/* METADATA -> File: {file_path} | Implements: {context_label} */\n"
-            
-            # The vector DB will now semantically link the raw code to these function names
+
             chunks.append((metadata_header + raw_text, i + 1))
 
         return chunks if chunks else [(f"/* METADATA -> File: {file_path} */\n{code}", 1)]
@@ -170,46 +162,34 @@ class CodeIndexer:
 
         snippets = []
 
-        # Walk through all repos
         for root, dirs, files in os.walk(self.repos_path):
-            # Remove skipped folders from dirs in-place (prevents walking into them)
             dirs[:] = [d for d in dirs if not self.should_skip_folder(d)]
 
-            # Get repo name (first folder under self.repos_path)
             repo_path = Path(root).relative_to(self.repos_path)
-            # Use explicit repo_name if provided, otherwise fallback to path logic
             repo_name = self.repo_name or (str(repo_path).split(os.sep)[0] if str(repo_path) != "." else "unknown")
 
             for file in files:
                 file_path = os.path.join(root, file)
 
-                # Skip if shouldn't index
                 if self.should_skip_file(file_path):
                     continue
 
                 try:
-                    # Read file
                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                         code = f.read()
 
                     if not code.strip():
                         continue
 
-                    # Get language
                     ext = Path(file_path).suffix.lower()
                     language = CODE_EXTENSIONS.get(ext, "text")
-
-                    # Get relative file path
                     rel_file_path = os.path.relpath(file_path, self.repos_path)
 
-                    # Chunk the code
                     chunks = self.chunk_code(code, file_path)
 
                     for chunk_text, start_line in chunks:
-                        # Construct a real source URL if it's a GitHub repo
                         source_url = self.repo_url if self.repo_url else f"file://{file_path}"
                         if self.repo_url and "github.com" in self.repo_url:
-                            # Remove .git suffix if present
                             base_url = self.repo_url.replace(".git", "")
                             source_url = f"{base_url}/blob/main/{rel_file_path}#L{start_line}"
 
@@ -226,21 +206,20 @@ class CodeIndexer:
                     logger.info(f"✅ Scanned {rel_file_path} ({language}) - {len(chunks)} chunks")
 
                 except Exception as e:
-                    logger.warning(f"⚠️ Failed to read {file_path}: {e}")
+                    logger.warning("Failed to read file [op=scan_repos, exc_type=%s]", type(e).__name__)
                     continue
 
         logger.info(f"📊 Total snippets found: {len(snippets)}")
         return snippets
 
-    def get_serverless_embedding(self, text: str) -> List[float]:
+    def get_serverless_embedding(self, text: str) -> Optional[List[float]]:
         """Get embeddings from Hugging Face Inference API"""
         hf_token = os.getenv("HF_TOKEN")
         model_id = "sentence-transformers/all-MiniLM-L6-v2"
         api_url = f"https://router.huggingface.co/hf-inference/models/{model_id}/pipeline/feature-extraction"
         headers = {"Authorization": f"Bearer {hf_token}"}
-        
+
         try:
-            # Increased timeout to 30s to prevent Read timed out errors
             response = requests.post(api_url, headers=headers, json={"inputs": [text]}, timeout=30)
             if response.status_code == 200:
                 res = response.json()
@@ -250,10 +229,10 @@ class CodeIndexer:
                     return res
                 return res
             else:
-                logger.error(f"HF Embedding Error: {response.text}")
+                logger.error(f"HF Embedding Error status={response.status_code}")
                 return None
         except Exception as e:
-            logger.error(f"Embedding Exception: {e}")
+            logger.error("Embedding exception [op=get_serverless_embedding, exc_type=%s]", type(e).__name__)
             return None
 
     def index_snippets(self, snippets: List[dict]) -> None:
@@ -266,15 +245,13 @@ class CodeIndexer:
 
         for i, snippet in enumerate(snippets, 1):
             try:
-                # Generate embedding
                 embedding = self.get_serverless_embedding(snippet["code_content"])
-                
+
                 if not embedding:
                     logger.warning(f"⚠️ Skipping snippet {i}: Failed to generate embedding")
                     self.failed_count += 1
                     continue
 
-                # Prepare data for Supabase
                 data = {
                     "repo_name": snippet["repo_name"],
                     "file_path": snippet["file_path"],
@@ -285,18 +262,15 @@ class CodeIndexer:
                     "user_id": self.user_id
                 }
 
-                # Insert into Supabase
                 result = self.db.table("code_snippets").insert(data).execute()
-
                 self.indexed_count += 1
-                
-                # Progress indicator
+
                 if i % 10 == 0:
                     logger.info(f"📈 Progress: {i}/{len(snippets)} snippets indexed")
 
             except Exception as e:
                 self.failed_count += 1
-                logger.error(f"❌ Failed to index snippet {i}: {e}")
+                logger.error("Failed to index snippet [op=index_snippets, exc_type=%s]", type(e).__name__)
 
         logger.info(f"✅ Indexing complete!")
         logger.info(f"📊 Successfully indexed: {self.indexed_count}")
@@ -308,17 +282,14 @@ class CodeIndexer:
         logger.info("CodeRAG Indexer Started")
         logger.info("=" * 60)
 
-        # Initialize
         if not self.initialize():
             return False
 
-        # Scan repos
         snippets = self.scan_repos()
         if not snippets:
             logger.error("❌ No snippets found to index")
             return False
 
-        # Index snippets
         self.index_snippets(snippets)
 
         logger.info("=" * 60)
@@ -329,14 +300,8 @@ class CodeIndexer:
 
 
 def main():
-    # Check environment variables
     if not SUPABASE_URL or not SUPABASE_KEY:
-        logger.error("❌ Missing environment variables:")
-        logger.error("   - SUPABASE_URL")
-        logger.error("   - SUPABASE_KEY")
-        logger.error("\nSet them using:")
-        logger.error("   export SUPABASE_URL='your_url'")
-        logger.error("   export SUPABASE_KEY='your_key'")
+        logger.error("❌ Missing SUPABASE_URL or SUPABASE_KEY environment variables")
         sys.exit(1)
 
     import argparse
@@ -344,14 +309,12 @@ def main():
     parser.add_argument("--user_id", type=str, help="Supabase User ID to associate code with")
     args = parser.parse_args()
 
-    # Run indexer
     indexer = CodeIndexer()
     if args.user_id:
         indexer.user_id = args.user_id
         logger.info(f"👤 Indexing for User ID: {args.user_id}")
-    
-    success = indexer.run()
 
+    success = indexer.run()
     sys.exit(0 if success else 1)
 
 

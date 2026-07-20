@@ -45,7 +45,7 @@ async def lifespan(app_instance: FastAPI):
         init_db()
         logger.info("✅ Telemetry DB initialized")
     except Exception as e:
-        logger.error(f"❌ Telemetry DB failed: {e}")
+        logger.error("Telemetry DB initialization failed [op=lifespan_init, exc_type=%s]", type(e).__name__)
 
     # 2. Init Supabase
     try:
@@ -57,7 +57,7 @@ async def lifespan(app_instance: FastAPI):
         else:
             logger.warning("⚠️ Supabase credentials missing!")
     except Exception as e:
-        logger.error(f"❌ Supabase init failed: {e}")
+        logger.error("Supabase client initialization failed [op=lifespan_init, exc_type=%s]", type(e).__name__)
 
     logger.info("✅ System ready (Using Serverless Embeddings)")
     yield
@@ -69,7 +69,7 @@ try:
     app = FastAPI(title="CodeRAG API", version="1.0.0", lifespan=lifespan)
     logger.info("🚀 Starting CodeRAG API...")
 except Exception as e:
-    logger.error(f"💥 Failed to initialize FastAPI: {e}")
+    logger.error("FastAPI initialization failed [op=app_init, exc_type=%s]", type(e).__name__)
     raise
 
 
@@ -154,13 +154,13 @@ def get_embedding(text: str) -> Optional[List[float]]:
                 return res
             return res
         else:
-            logger.error(f"HF Embedding API returned status {response.status_code}")
+            logger.error("HF Embedding API returned non-200 status [op=get_embedding, status_code=%s]", response.status_code)
             return None
     except requests.exceptions.Timeout:
-        logger.error("⏱️ HF Embedding API timed out")
+        logger.error("HF Embedding API timed out [op=get_embedding, exc_type=Timeout]")
         return None
     except Exception as e:
-        logger.error(f"Embedding failed: {e}")
+        logger.error("Embedding request failed [op=get_embedding, exc_type=%s]", type(e).__name__)
         return None
 
 
@@ -232,7 +232,7 @@ async def search(request: SearchRequest):
                 confidence=cached["confidence"],
             )
     except Exception as cache_err:
-        logger.warning(f"Cache check failed silently: {cache_err}")
+        logger.warning("Cache check failed silently [op=cache_check, exc_type=%s]", type(cache_err).__name__)
 
     try:
         # Step 1: Embed Query (Serverless)
@@ -261,7 +261,7 @@ async def search(request: SearchRequest):
                 res = search_rpc.execute()
                 vector_results_data = res.data or []
             except Exception as rpc_e:
-                logger.error(f"User-scoped vector search RPC failed: {rpc_e}")
+                logger.error("User-scoped vector search RPC failed [op=search_user_rpc, exc_type=%s]", type(rpc_e).__name__)
                 # FAIL CLOSED: Do not perform an unscoped retry!
                 raise HTTPException(
                     status_code=500,
@@ -282,7 +282,7 @@ async def search(request: SearchRequest):
                 res = search_rpc.execute()
                 vector_results_data = res.data or []
             except Exception as rpc_e:
-                logger.error(f"Vector search RPC failed: {rpc_e}")
+                logger.error("Vector search RPC failed [op=search_anon_rpc, exc_type=%s]", type(rpc_e).__name__)
                 vector_results_data = []
 
         # Step 2.5: Keyword Search (Exact Match Fallback - strictly user-scoped when user_id is present)
@@ -316,7 +316,7 @@ async def search(request: SearchRequest):
                     if kw_res.data:
                         keyword_results.extend(kw_res.data)
                 except Exception as kw_e:
-                    logger.warning(f"Keyword search failed for key '{kw}': {kw_e}")
+                    logger.warning("Keyword search failed [op=keyword_search, exc_type=%s]", type(kw_e).__name__)
 
         # Merge and deduplicate
         merged_data = []
@@ -437,13 +437,13 @@ FOLLOW_UPS:
             if res.status_code == 200:
                 final_answer = res.json()["choices"][0]["message"]["content"]
             else:
-                logger.error(f"HF Router Error (Status {res.status_code})")
+                logger.error("HF Router Error non-200 status [op=chat_completion, status_code=%s]", res.status_code)
                 final_answer = f"Cerebro retrieved relevant snippets, but the AI router service was unavailable (Status {res.status_code})."
         except requests.exceptions.Timeout:
-            logger.error("HF Router API timed out")
+            logger.error("HF Router API timed out [op=chat_completion, exc_type=Timeout]")
             final_answer = "Cerebro retrieved relevant snippets, but the AI router service timed out."
         except Exception as api_e:
-            logger.error(f"HF Router Connection Error: {api_e}")
+            logger.error("HF Router connection failed [op=chat_completion, exc_type=%s]", type(api_e).__name__)
             final_answer = "Cerebro retrieved relevant snippets, but could not connect to the AI router."
 
         # Parse out follow-up questions
@@ -466,7 +466,7 @@ FOLLOW_UPS:
             save_chat(request.user_id or "default_thread", request.query, answer_text, sources)
             set_cached_query(request.query, request.repo_filter, answer_text, sources, confidence, request.user_id)
         except Exception as log_e:
-            logger.warning(f"Logging failed: {log_e}")
+            logger.warning("Logging failed [op=post_search_logging, exc_type=%s]", type(log_e).__name__)
 
         return SearchResponse(
             answer=answer_text,
@@ -479,7 +479,7 @@ FOLLOW_UPS:
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Search execution failed unexpectedly")
+        logger.error("Search execution failed unexpectedly [op=search, exc_type=%s]", type(e).__name__)
         raise HTTPException(
             status_code=500, detail="Search failed due to an internal server error."
         )
@@ -490,7 +490,7 @@ async def fetch_analytics():
     try:
         return get_analytics()
     except Exception as e:
-        logger.exception("Analytics fetch failed")
+        logger.error("Analytics fetch failed [op=fetch_analytics, exc_type=%s]", type(e).__name__)
         return {"total_searches": 0, "avg_latency_ms": 0.0, "avg_confidence": 0.0, "recent_queries": []}
 
 
@@ -499,7 +499,7 @@ async def fetch_history():
     try:
         return get_chat_history()
     except Exception as e:
-        logger.exception("History fetch failed")
+        logger.error("History fetch failed [op=fetch_history, exc_type=%s]", type(e).__name__)
         return []
 
 
@@ -544,7 +544,7 @@ async def index_snippet(request: IndexRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Indexing failed unexpectedly")
+        logger.error("Indexing failed unexpectedly [op=index_snippet, exc_type=%s]", type(e).__name__)
         raise HTTPException(status_code=500, detail="Indexing failed due to an internal error.")
 
 
@@ -586,7 +586,7 @@ async def ingest_repo(request: IngestRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Ingestion failed")
+        logger.error("Ingestion failed [op=ingest_repo, exc_type=%s]", type(e).__name__)
         raise HTTPException(status_code=500, detail="Ingestion failed due to an internal error.")
     finally:
         def onerror(func, path, exc_info):
@@ -601,7 +601,7 @@ async def ingest_repo(request: IngestRequest):
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, onerror=onerror)
         except Exception as cleanup_e:
-            logger.warning(f"⚠️ Cleanup failed for {temp_dir}: {cleanup_e}")
+            logger.warning("Cleanup failed [op=ingest_cleanup, exc_type=%s]", type(cleanup_e).__name__)
 
 
 @app.get("/user-repos")
@@ -617,7 +617,7 @@ async def get_user_repos(user_id: str = Query(..., min_length=1, max_length=200)
         repos = sorted(list(set([r["repo_name"] for r in (result.data or []) if "repo_name" in r])))
         return {"repos": repos}
     except Exception as e:
-        logger.exception("Failed to fetch user repos")
+        logger.error("Failed to fetch user repos [op=get_user_repos, exc_type=%s]", type(e).__name__)
         raise HTTPException(status_code=500, detail="Failed to fetch repositories.")
 
 
@@ -636,7 +636,7 @@ async def delete_repo(
         db.table("code_snippets").delete().eq("repo_name", repo_name).eq("user_id", user_id).execute()
         return {"status": "success", "message": f"Repository {repo_name} deleted"}
     except Exception as e:
-        logger.exception("Failed to delete repo")
+        logger.error("Failed to delete repo [op=delete_repo, exc_type=%s]", type(e).__name__)
         raise HTTPException(status_code=500, detail="Failed to delete repository.")
 
 
@@ -677,7 +677,7 @@ async def get_graph_data(user_id: str = Query(..., min_length=1, max_length=200)
 
         return {"nodes": nodes, "links": links}
     except Exception as e:
-        logger.exception("Failed to generate graph")
+        logger.error("Failed to generate graph [op=get_graph_data, exc_type=%s]", type(e).__name__)
         raise HTTPException(status_code=500, detail="Failed to generate graph visualization.")
 
 
