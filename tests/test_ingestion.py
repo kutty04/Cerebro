@@ -412,11 +412,7 @@ def test_rollback_does_not_delete_valid_repo_snippets(mock_db, client):
     mock_table = MagicMock()
     mock_db.table.return_value = mock_table
 
-    mock_table.insert.side_effect = [
-        MagicMock(execute=lambda: MagicMock(data=[{"id": 501}])),
-        MagicMock(execute=lambda: MagicMock(data=[{"id": 502}])),
-        Exception("DB Insert Crash"),
-    ]
+    mock_table.insert.side_effect = Exception("DB Insert Crash")
 
     temp_dir = tempfile.mkdtemp()
     try:

@@ -699,6 +699,16 @@ async def ingest_repo(ingest_req: IngestRequest, current_user: AuthenticatedUser
                 "status": "success",
                 "message": f"Successfully indexed {len(inserted_snippet_ids)} snippets from {canonical_url}",
                 "indexed_count": len(inserted_snippet_ids),
+                "repository_id": repo_id,
+                "ingestion_job_id": job_id,
+                "index_version": new_ver,
+                "indexed_commit_sha": indexer.detected_commit_sha or indexer.commit_sha,
+                "default_branch": indexer.detected_branch,
+                "files_considered": indexer.metrics.get("files_considered", 0),
+                "files_indexed": indexer.metrics.get("files_indexed", 0),
+                "chunks_generated": indexer.metrics.get("chunks_generated", 0),
+                "chunks_deduplicated": indexer.metrics.get("chunks_deduplicated", 0),
+                "indexing_duration_ms": indexer.metrics.get("total_indexing_duration_ms", 0.0),
             }
 
         except HTTPException as he:
