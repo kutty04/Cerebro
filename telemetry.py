@@ -82,6 +82,26 @@ def init_db():
             if "user_id" not in cols:
                 conn.execute("ALTER TABLE search_logs ADD COLUMN user_id TEXT")
 
+            # Create schema_version table
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER PRIMARY KEY
+                )
+            ''')
+
+            # Ensure response_json column exists in query_cache
+            cursor.execute("PRAGMA table_info(query_cache)")
+            cache_cols = [row[1] for row in cursor.fetchall()]
+            if "response_json" not in cache_cols:
+                conn.execute("ALTER TABLE query_cache ADD COLUMN response_json TEXT")
+
+            # Initialize version tracking
+            cursor.execute("SELECT COUNT(*) FROM schema_version")
+            if cursor.fetchone()[0] == 0:
+                conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+            else:
+                conn.execute("UPDATE schema_version SET version = 1")
+
     except Exception as e:
         logger.error("Telemetry database init failed [op=init_db, exc_type=%s]", type(e).__name__)
 
@@ -137,7 +157,7 @@ def get_cached_query(
 ):
     """
     Reads query cache strictly matching canonical SHA-256 hash and user_id (valid for 24 hours).
-    Dynamically unpacks rich timing and summary metadata from sources_json.
+    Supports schema-versioned response_json and safe fallbacks for legacy query formats.
     """
     if not user_id:
         return None
@@ -158,33 +178,54 @@ def get_cached_query(
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT answer, sources_json, confidence 
+                SELECT answer, sources_json, response_json, confidence 
                 FROM query_cache 
                 WHERE query_hash = ? AND user_id = ? AND timestamp >= datetime('now', '-1 day')
             ''', (key, user_id))
             row = cursor.fetchone()
             if row:
-                sources_data = json.loads(row["sources_json"])
-                # Handle rich unpacked format
-                if isinstance(sources_data, dict) and "sources" in sources_data:
-                    return {
-                        "answer": row["answer"],
-                        "sources": sources_data["sources"],
-                        "summary": sources_data.get("summary"),
-                        "limitations": sources_data.get("limitations", []),
-                        "metadata": sources_data.get("metadata"),
-                        "confidence": row["confidence"]
-                    }
-                else:
-                    # Legacy fallback
-                    return {
-                        "answer": row["answer"],
-                        "sources": sources_data,
-                        "summary": None,
-                        "limitations": [],
-                        "metadata": None,
-                        "confidence": row["confidence"]
-                    }
+                # 1. Try to read from schema-versioned response_json
+                if row["response_json"]:
+                    try:
+                        resp = json.loads(row["response_json"])
+                        if isinstance(resp, dict) and resp.get("cache_schema_version") == "grounded-response-v1":
+                            return {
+                                "answer": resp.get("answer"),
+                                "sources": resp.get("sources"),
+                                "summary": resp.get("summary"),
+                                "limitations": resp.get("limitations", []),
+                                "metadata": resp.get("metadata"),
+                                "follow_ups": resp.get("follow_ups", []),
+                                "confidence": row["confidence"]
+                            }
+                        else:
+                            # Schema version change produces a cache miss
+                            return None
+                    except Exception:
+                        return None
+
+                # 2. Legacy fallback check
+                sources_str = row["sources_json"]
+                if sources_str:
+                    stripped = sources_str.strip()
+                    if stripped.startswith("["):
+                        try:
+                            sources_data = json.loads(stripped)
+                            if isinstance(sources_data, list):
+                                return {
+                                    "answer": row["answer"],
+                                    "sources": sources_data,
+                                    "summary": None,
+                                    "limitations": [],
+                                    "metadata": None,
+                                    "follow_ups": [],
+                                    "confidence": row["confidence"]
+                                }
+                        except Exception:
+                            pass
+                    elif stripped.startswith("{"):
+                        # Mixed legacy data inside sources_json produces a cache miss
+                        return None
     except Exception as e:
         logger.error("Telemetry cache read failed [op=cache_read, exc_type=%s]", type(e).__name__)
     return None
@@ -206,10 +247,12 @@ def set_cached_query(
     summary: Optional[str] = None,
     limitations: Optional[list] = None,
     metadata: Optional[dict] = None,
+    follow_ups: Optional[list] = None,
 ):
     """
     Writes query cache strictly scoped by canonical SHA-256 hash and authenticated user_id.
-    Packs timing, summary, and limitations metadata directly inside sources_json.
+    Stores the server-derived sources array in sources_json and the complete validated
+    grounded response in response_json.
     """
     if not user_id:
         return
@@ -227,18 +270,21 @@ def set_cached_query(
             history=history,
         )
         
-        packed_data = {
-            "sources": sources,
+        response_data = {
+            "cache_schema_version": "grounded-response-v1",
+            "answer": answer,
             "summary": summary,
+            "sources": sources,
+            "follow_ups": follow_ups or [],
             "limitations": limitations or [],
-            "metadata": metadata
+            "metadata": metadata or {}
         }
         
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute('''
-                INSERT OR REPLACE INTO query_cache (query_hash, user_id, repo_filter, answer, sources_json, confidence)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (key, user_id, repo_filter or "ALL", answer, json.dumps(packed_data), confidence))
+                INSERT OR REPLACE INTO query_cache (query_hash, user_id, repo_filter, answer, sources_json, response_json, confidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (key, user_id, repo_filter or "ALL", answer, json.dumps(sources), json.dumps(response_data), confidence))
     except Exception as e:
         logger.error("Telemetry cache write failed [op=cache_write, exc_type=%s]", type(e).__name__)
 

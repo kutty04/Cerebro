@@ -18,7 +18,7 @@ class DatabaseAdapter:
     def _handle_db_error(e: Exception, operation: str):
         """Catches database driver or table missing exceptions and returns sanitized errors."""
         err_msg = str(e)
-        logger.error("Database operation failed [op=%s, exc_type=%s, msg=%s]", operation, type(e).__name__, err_msg)
+        logger.error("Database operation failed [op=%s, exc_type=%s]", operation, type(e).__name__)
 
         # Fail safely if tables are not migrated/present in schema
         if "relation" in err_msg.lower() and "does not exist" in err_msg.lower():

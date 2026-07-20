@@ -597,41 +597,60 @@ Your response must be a valid JSON object matching the following structure:
 
     generation_start = time.time()
     res_text = None
-    
-    # Retry logic (maximum 1 retry) for transient errors only
+
+    # Retry logic (maximum 1 retry) for genuinely transient failures only
     for attempt in range(2):
         try:
             res = requests.post(url, headers=headers, json=payload, timeout=15)
             if res.status_code == 200:
                 res_text = res.json()["choices"][0]["message"]["content"]
                 break
-            elif res.status_code in [429, 502, 503, 504]:
+
+            # 429 is not retryable, directly propagate sanitized Retry-After header
+            if res.status_code == 429:
+                retry_after_str = res.headers.get("Retry-After")
+                headers_to_send = {}
+                if retry_after_str:
+                    try:
+                        retry_after_sec = int(retry_after_str)
+                        sanitized_retry_after = min(max(retry_after_sec, 1), 60)
+                        headers_to_send["Retry-After"] = str(sanitized_retry_after)
+                    except ValueError:
+                        pass
+                raise HTTPException(
+                    status_code=429,
+                    detail="AI service rate limit exceeded. Please try again later.",
+                    headers=headers_to_send
+                )
+
+            # 400, 422, 401, 403 are not retryable
+            if res.status_code in [400, 422]:
+                raise HTTPException(status_code=400, detail="Invalid search or filter request.")
+            if res.status_code in [401, 403]:
+                raise HTTPException(status_code=res.status_code, detail="AI service authentication failed.")
+
+            # Transient HTTP errors are retryable
+            if res.status_code in [502, 503, 504]:
                 if attempt == 0:
                     logger.warning("Transient LLM error status=%d, retrying once... [op=chat_retry]", res.status_code)
                     time.sleep(1)
                     continue
                 else:
                     logger.error("LLM provider transient failure status=%d [op=chat_completion]", res.status_code)
-                    if res.status_code == 429:
-                        raise HTTPException(status_code=429, detail="AI service rate limit exceeded.")
-                    else:
-                        raise HTTPException(status_code=503, detail="AI service is currently unavailable.")
-            else:
-                logger.error("LLM provider non-retryable status=%d [op=chat_completion]", res.status_code)
-                if res.status_code in [400, 422]:
-                    raise HTTPException(status_code=400, detail="Invalid search or filter request.")
-                elif res.status_code in [401, 403]:
-                    raise HTTPException(status_code=res.status_code, detail="AI service authentication failed.")
-                else:
-                    raise HTTPException(status_code=502, detail="Invalid response from AI provider.")
-        except requests.exceptions.Timeout:
+                    raise HTTPException(status_code=503, detail="AI service is currently unavailable.")
+
+            # Other HTTP errors: non-retryable
+            logger.error("LLM provider non-retryable status=%d [op=chat_completion]", res.status_code)
+            raise HTTPException(status_code=502, detail="Invalid response from AI provider.")
+
+        except requests.exceptions.RequestException as req_err:
             if attempt == 0:
-                logger.warning("LLM API timeout, retrying once... [op=chat_retry]")
+                logger.warning("LLM API network error, retrying once... [op=chat_retry, exc_type=%s]", type(req_err).__name__)
                 time.sleep(1)
                 continue
             else:
-                logger.error("LLM API timed out [op=chat_completion]")
-                raise HTTPException(status_code=503, detail="AI service request timed out.")
+                logger.error("LLM API network error failed on retry [op=chat_completion, exc_type=%s]", type(req_err).__name__)
+                raise HTTPException(status_code=503, detail="AI service request timed out or connection failed.")
         except HTTPException:
             raise
         except Exception as e:
@@ -692,23 +711,25 @@ Your response must be a valid JSON object matching the following structure:
         log_search(search_req.query, search_req.repo_filter, confidence, total_time * 1000, user_id=user_id)
         add_message_to_conversation(conv_id, user_id, "user", search_req.query)
         add_message_to_conversation(conv_id, user_id, "assistant", validated.answer, sources)
-        set_cached_query(
-            query=search_req.query,
-            user_id=user_id,
-            answer=validated.answer,
-            sources=sources,
-            confidence=confidence,
-            repo_filter=search_req.repo_filter,
-            model=model_name,
-            index_version=resolved_index_version,
-            top_k=top_k,
-            retrieval_strategy="rrf-v1",
-            prompt_version="v1",
-            history=search_req.history,
-            summary=validated.summary,
-            limitations=validated.limitations,
-            metadata=search_metadata
-        )
+        if final_results and sources:
+            set_cached_query(
+                query=search_req.query,
+                user_id=user_id,
+                answer=validated.answer,
+                sources=sources,
+                confidence=confidence,
+                repo_filter=search_req.repo_filter,
+                model=model_name,
+                index_version=resolved_index_version,
+                top_k=top_k,
+                retrieval_strategy="rrf-v1",
+                prompt_version="v1",
+                history=search_req.history,
+                summary=validated.summary,
+                limitations=validated.limitations,
+                metadata=search_metadata,
+                follow_ups=validated.follow_ups
+            )
     except Exception as log_e:
         logger.warning("Logging failed [op=post_search_logging, exc_type=%s]", type(log_e).__name__)
 
