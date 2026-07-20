@@ -10,7 +10,7 @@ SET search_path = public, pg_temp;
 -- STAGE 1: ADDITIVE SCHEMA UPDATES
 -- ==========================================
 
--- 1. Create User Repositories Table
+-- 1. Create User Repositories Table with Status Constraints
 CREATE TABLE IF NOT EXISTS user_repositories (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
     user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -21,22 +21,22 @@ CREATE TABLE IF NOT EXISTS user_repositories (
     default_branch text DEFAULT 'main',
     indexed_commit_sha text,
     active_index_version text DEFAULT 'v1',
-    status text DEFAULT 'pending', -- pending, cloning, indexing, ready, failed, deleting
+    status text DEFAULT 'pending' CHECK (status IN ('pending', 'cloning', 'indexing', 'ready', 'failed', 'deleting')),
     indexed_file_count integer DEFAULT 0,
     indexed_chunk_count integer DEFAULT 0,
     last_error_category text,
     created_at timestamptz DEFAULT now(),
     updated_at timestamptz DEFAULT now(),
-    last_indexed_at timestamptz DEFAULT now(),
+    last_indexed_at timestamptz, -- NULL before the first successful index promotion
     CONSTRAINT user_repo_unique UNIQUE(user_id, canonical_url)
 );
 
--- 2. Create Ingestion Jobs Table
+-- 2. Create Ingestion Jobs Table with Status Constraints
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
     user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     repository_id uuid NOT NULL REFERENCES user_repositories(id) ON DELETE CASCADE,
-    status text DEFAULT 'pending', -- pending, cloning, indexing, completed, failed
+    status text DEFAULT 'pending' CHECK (status IN ('pending', 'cloning', 'indexing', 'completed', 'failed')),
     started_at timestamptz DEFAULT now(),
     completed_at timestamptz,
     updated_at timestamptz DEFAULT now(),
@@ -82,6 +82,7 @@ CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_lookup ON ingestion_jobs(repositor
 CREATE INDEX IF NOT EXISTS idx_code_snippets_repo_version ON code_snippets(repository_id, index_version);
 CREATE INDEX IF NOT EXISTS idx_code_snippets_job ON code_snippets(ingestion_job_id);
 CREATE INDEX IF NOT EXISTS idx_code_snippets_content_hash ON code_snippets(content_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_active_ingestion_jobs ON ingestion_jobs (user_id, repository_id) WHERE (status IN ('pending', 'cloning', 'indexing'));
 
 
 -- ==========================================
@@ -154,6 +155,30 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   effective_user_id text;
+END;
+$$; -- Empty placeholder for type signature before full body
+
+CREATE OR REPLACE FUNCTION search_code_snippets(
+  query_embedding vector(384),
+  match_count int DEFAULT 5,
+  p_user_id text DEFAULT NULL,
+  p_repository_id uuid DEFAULT NULL,
+  p_index_version text DEFAULT NULL
+)
+RETURNS TABLE (
+  id bigint,
+  repo_name text,
+  file_path text,
+  language text,
+  code_content text,
+  source_url text,
+  similarity float4
+)
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  effective_user_id text;
 BEGIN
   -- Strict context isolation
   effective_user_id := COALESCE(auth.uid()::text, p_user_id);
@@ -185,3 +210,97 @@ $$ LANGUAGE plpgsql;
 REVOKE ALL ON FUNCTION search_code_snippets(vector, int, text, uuid, text) FROM public;
 GRANT EXECUTE ON FUNCTION search_code_snippets(vector, int, text, uuid, text) TO authenticated;
 GRANT EXECUTE ON FUNCTION search_code_snippets(vector, int, text, uuid, text) TO anon;
+
+
+-- ==========================================
+-- STAGE 5: INDEX PROMOTION TRANSACTION RPC
+-- ==========================================
+
+-- ==============================================================================
+-- SECURITY WARNING: This function is strictly NOT browser-callable.
+-- Execution is revoked from authenticated/anon roles, granted only to service_role.
+-- The server-side API client verifies user tokens before executing via service-role context.
+-- ==============================================================================
+CREATE OR REPLACE FUNCTION promote_repository_index(
+  p_user_id uuid,
+  p_repository_id uuid,
+  p_ingestion_job_id uuid,
+  p_new_version text,
+  p_commit_sha text
+)
+RETURNS boolean
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_job_status text;
+  v_repo_user_id uuid;
+  v_job_user_id uuid;
+  v_job_repo_id uuid;
+  v_snippet_count int;
+BEGIN
+  -- 1. Acquire row-level locks to prevent simultaneous promotion races
+  SELECT user_id INTO v_repo_user_id FROM user_repositories WHERE id = p_repository_id FOR UPDATE;
+  IF v_repo_user_id IS NULL OR v_repo_user_id != p_user_id THEN
+    RAISE EXCEPTION 'Repository not found or unauthorized access.';
+  END IF;
+
+  SELECT user_id, repository_id, status INTO v_job_user_id, v_job_repo_id, v_job_status 
+  FROM ingestion_jobs WHERE id = p_ingestion_job_id FOR UPDATE;
+  
+  IF v_job_user_id IS NULL OR v_job_user_id != p_user_id OR v_job_repo_id != p_repository_id THEN
+    RAISE EXCEPTION 'Ingestion job mismatch or unauthorized access.';
+  END IF;
+
+  -- 2. Idempotent check: if job is already completed and version is promoted, return true
+  IF v_job_status = 'completed' AND EXISTS (
+      SELECT 1 FROM user_repositories 
+      WHERE id = p_repository_id AND active_index_version = p_new_version
+  ) THEN
+      RETURN true;
+  END IF;
+
+  -- 3. Strict transition checks
+  IF v_job_status != 'indexing' THEN
+    RAISE EXCEPTION 'Job is not in indexing state. Current state: %', v_job_status;
+  END IF;
+
+  -- 4. Verify target snippets exist for that job/version (no empty index promotion)
+  SELECT COUNT(*) INTO v_snippet_count FROM code_snippets 
+  WHERE repository_id = p_repository_id 
+    AND ingestion_job_id = p_ingestion_job_id 
+    AND index_version = p_new_version;
+    
+  IF v_snippet_count = 0 THEN
+    RAISE EXCEPTION 'No snippets found for the newly indexed job/version.';
+  END IF;
+
+  -- 5. Atomically execute updates and deletes in one transaction block
+  -- a. Promote active_index_version, set status to ready, and record commit SHA
+  UPDATE user_repositories
+  SET active_index_version = p_new_version,
+      status = 'ready',
+      indexed_commit_sha = p_commit_sha,
+      last_indexed_at = now(),
+      updated_at = now()
+  WHERE id = p_repository_id AND user_id = p_user_id;
+
+  -- b. Complete job status
+  UPDATE ingestion_jobs
+  SET status = 'completed',
+      completed_at = now(),
+      updated_at = now()
+  WHERE id = p_ingestion_job_id AND user_id = p_user_id;
+
+  -- c. Clean up previous versions snippets for this repository and user (never delete newly promoted version snippets)
+  DELETE FROM code_snippets
+  WHERE repository_id = p_repository_id
+    AND user_id = p_user_id::text
+    AND (index_version != p_new_version OR ingestion_job_id != p_ingestion_job_id);
+
+  RETURN true;
+END;
+$$ LANGUAGE plpgsql;
+
+REVOKE ALL ON FUNCTION promote_repository_index(uuid, uuid, uuid, text, text) FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION promote_repository_index(uuid, uuid, uuid, text, text) TO service_role;

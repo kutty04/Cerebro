@@ -381,21 +381,24 @@ def test_duplicate_active_job_conflict():
 
 
 def test_promote_index_version_success():
-    """Verifies that index version promotion successfully updates repository and purges older indexes."""
+    """Verifies that index version promotion successfully calls the promote_repository_index RPC transaction."""
     mock_db = MagicMock()
-    mock_table = MagicMock()
-    mock_table.update.return_value = mock_table
-    mock_table.delete.return_value = mock_table
-    mock_table.eq.return_value = mock_table
-    mock_table.neq.return_value = mock_table
-    mock_db.table.return_value = mock_table
+    mock_rpc = MagicMock()
+    mock_rpc.execute.return_value = MagicMock(data=True)
+    mock_db.rpc.return_value = mock_rpc
 
     DatabaseAdapter.promote_index_version(mock_db, "user-123", "repo-123", "job-123", "v2", "sha-abc")
 
-    # Assert repository active version promoted
-    mock_db.table.assert_any_call("user_repositories")
-    # Assert code snippets cleanup of other versions called
-    mock_db.table.assert_any_call("code_snippets")
+    mock_db.rpc.assert_called_once_with(
+        "promote_repository_index",
+        {
+            "p_user_id": "user-123",
+            "p_repository_id": "repo-123",
+            "p_ingestion_job_id": "job-123",
+            "p_new_version": "v2",
+            "p_commit_sha": "sha-abc",
+        }
+    )
 
 
 def test_fail_and_cleanup_job_success():
@@ -460,7 +463,114 @@ def test_sql_migration_static_checks():
 
     # Idempotency and Non-Execution Status
     assert "NOT YET APPLIED TO LIVE PRODUCTION" in sql
-    assert "DELETE FROM" not in sql
+    # Scoped delete check
+    assert "DELETE FROM code_snippets" in sql
+    assert "WHERE repository_id =" in sql
+    # Ensure no broad unscoped table deletes
+    assert "DELETE FROM code_snippets;" not in sql
+    assert "DELETE FROM user_repositories" not in sql
+    assert "DELETE FROM ingestion_jobs" not in sql
+
+    # Row-level locking checks
+    assert "FOR UPDATE" in sql
+
+    # Service-role execution checks
+    assert "REVOKE ALL ON FUNCTION promote_repository_index" in sql
+    assert "TO service_role;" in sql
+
+    # Partial unique index active ingestion job checks
+    assert "CREATE UNIQUE INDEX" in sql
+    assert "WHERE (status IN ('pending', 'cloning', 'indexing'))" in sql
+
+
+# ----------------------------------------------------------------------
+# 9. FAILURE-SAFETY & LIFECYCLE TRANSITION TESTS
+# ----------------------------------------------------------------------
+
+def test_illegal_job_status_transition():
+    """Verifies that illegal job state transitions trigger HTTPException (400)."""
+    mock_db = MagicMock()
+    mock_table = MagicMock()
+    mock_table.select.return_value = mock_table
+    mock_table.eq.return_value = mock_table
+    # Job is completed
+    mock_table.execute.return_value = MagicMock(data=[{"status": "completed"}])
+    mock_db.table.return_value = mock_table
+
+    with pytest.raises(HTTPException) as exc_info:
+        DatabaseAdapter.update_job_status(mock_db, "user-123", "job-123", "indexing")
+    assert exc_info.value.status_code == 400
+    assert "Illegal job status transition" in exc_info.value.detail
+
+
+def test_illegal_repo_status_transition():
+    """Verifies that illegal repository state transitions trigger HTTPException (400)."""
+    mock_db = MagicMock()
+    mock_table = MagicMock()
+    mock_table.select.return_value = mock_table
+    mock_table.eq.return_value = mock_table
+    # Repository is ready
+    mock_table.execute.return_value = MagicMock(data=[{"status": "ready"}])
+    mock_db.table.return_value = mock_table
+
+    with pytest.raises(HTTPException) as exc_info:
+        DatabaseAdapter.update_repo_status(mock_db, "user-123", "repo-123", "indexing")
+    assert exc_info.value.status_code == 400
+    assert "Illegal repository status transition" in exc_info.value.detail
+
+
+def test_failed_job_retains_ready_status_and_commit_sha():
+    """Verifies that a failed job does not make a previously ready repository failed or wipe its commit SHA."""
+    mock_db = MagicMock()
+    mock_table = MagicMock()
+    mock_table.select.side_effect = [
+        # Job select
+        mock_table,
+        # Repo select
+        mock_table
+    ]
+    mock_table.eq.return_value = mock_table
+    
+    # Mock selects: job is indexing, repository is ready
+    mock_table.execute.side_effect = [
+        MagicMock(data=[{"status": "indexing"}]),
+        MagicMock(data=[{"status": "ready"}])
+    ]
+    mock_db.table.return_value = mock_table
+
+    # Run fail_and_cleanup_job
+    DatabaseAdapter.fail_and_cleanup_job(mock_db, "user-123", "repo-123", "job-123", "GitCloneError")
+
+    # Assert repo update keeps status ready
+    called_args = mock_table.update.call_args_list
+    # In fail_and_cleanup_job:
+    # First update: job status -> failed
+    # Second update: repo status -> ready (retained!)
+    repo_update_payload = called_args[1][0][0]
+    assert repo_update_payload["status"] == "ready"
+    assert "indexed_commit_sha" not in repo_update_payload
+
+
+def test_successful_promotion_invokes_rpc():
+    """Verifies that successful promotion calls the promote_repository_index RPC with all parameters."""
+    mock_db = MagicMock()
+    mock_rpc = MagicMock()
+    mock_rpc.execute.return_value = MagicMock(data=True)
+    mock_db.rpc.return_value = mock_rpc
+
+    DatabaseAdapter.promote_index_version(mock_db, "user-123", "repo-123", "job-123", "v2", "commit-sha-456")
+
+    mock_db.rpc.assert_called_once_with(
+        "promote_repository_index",
+        {
+            "p_user_id": "user-123",
+            "p_repository_id": "repo-123",
+            "p_ingestion_job_id": "job-123",
+            "p_new_version": "v2",
+            "p_commit_sha": "commit-sha-456",
+        }
+    )
+
 
 
 

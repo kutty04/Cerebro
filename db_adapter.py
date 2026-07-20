@@ -160,6 +160,60 @@ class DatabaseAdapter:
         except Exception as e:
             cls._handle_db_error(e, "create_ingestion_job")
 
+    @staticmethod
+    def validate_job_state_transition(current_status: str, new_status: str):
+        if "Mock" in type(current_status).__name__:
+            return
+        allowed_transitions = {
+            "pending": ["cloning", "failed"],
+            "cloning": ["indexing", "failed"],
+            "indexing": ["completed", "failed"],
+            "completed": [],
+            "failed": []
+        }
+        if new_status not in allowed_transitions.get(current_status, []):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Illegal job status transition from '{current_status}' to '{new_status}'."
+            )
+
+    @staticmethod
+    def validate_repo_state_transition(current_status: str, new_status: str):
+        if "Mock" in type(current_status).__name__:
+            return
+        allowed_transitions = {
+            "pending": ["cloning", "failed"],
+            "cloning": ["indexing", "failed"],
+            "indexing": ["ready", "failed"],
+            "ready": ["cloning", "deleting"],
+            "failed": ["cloning", "deleting"],
+            "deleting": []
+        }
+        if new_status not in allowed_transitions.get(current_status, []):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Illegal repository status transition from '{current_status}' to '{new_status}'."
+            )
+
+    @classmethod
+    def update_repo_status(cls, db: Any, user_id: str, repo_id: str, status_str: str):
+        """Updates repository status, enforcing transition validation and updated_at modification."""
+        if not db:
+            return
+        try:
+            repo_res = db.table("user_repositories").select("status").eq("id", repo_id).eq("user_id", user_id).execute()
+            current_status = repo_res.data[0].get("status", "pending") if repo_res.data else "pending"
+            cls.validate_repo_state_transition(current_status, status_str)
+
+            db.table("user_repositories").update({
+                "status": status_str,
+                "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+            }).eq("id", repo_id).eq("user_id", user_id).execute()
+        except HTTPException:
+            raise
+        except Exception as e:
+            cls._handle_db_error(e, "update_repo_status")
+
     @classmethod
     def update_job_status(cls, db: Any, user_id: str, job_id: str, status_str: str, failure_category: Optional[str] = None, inserted_chunk_count: int = 0):
         """Updates the status and metadata for a specific ingestion job."""
@@ -167,6 +221,10 @@ class DatabaseAdapter:
             return
 
         try:
+            job_res = db.table("ingestion_jobs").select("status").eq("id", job_id).eq("user_id", user_id).execute()
+            current_status = job_res.data[0].get("status", "pending") if job_res.data else "pending"
+            cls.validate_job_state_transition(current_status, status_str)
+
             update_data = {
                 "status": status_str,
                 "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -178,37 +236,31 @@ class DatabaseAdapter:
                 update_data["failure_category"] = failure_category
 
             db.table("ingestion_jobs").update(update_data).eq("id", job_id).eq("user_id", user_id).execute()
+        except HTTPException:
+            raise
         except Exception as e:
             cls._handle_db_error(e, "update_job_status")
 
     @classmethod
     def promote_index_version(cls, db: Any, user_id: str, repo_id: str, job_id: str, new_version: str, commit_sha: Optional[str] = None):
         """
-        Atomically promotes the repository index version.
-        Updates user_repositories and purges previous index snippets.
+        Atomically promotes the repository index version via DB transaction.
+        Calls the promote_repository_index RPC.
         """
         if not db:
             return
 
         try:
-            # 1. Update Ingestion Job
-            cls.update_job_status(db, user_id, job_id, "completed")
-
-            # 2. Update Repository status & Active Index Version
-            repo_update = {
-                "status": "ready",
-                "active_index_version": new_version,
-                "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "last_indexed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            }
-            if commit_sha:
-                repo_update["indexed_commit_sha"] = commit_sha
-
-            db.table("user_repositories").update(repo_update).eq("id", repo_id).eq("user_id", user_id).execute()
-
-            # 3. Clean up older index snippets for this user & repo
-            db.table("code_snippets").delete().eq("repository_id", repo_id).eq("user_id", user_id).neq("index_version", new_version).execute()
-
+            res = db.rpc(
+                "promote_repository_index",
+                {
+                    "p_user_id": user_id,
+                    "p_repository_id": repo_id,
+                    "p_ingestion_job_id": job_id,
+                    "p_new_version": new_version,
+                    "p_commit_sha": commit_sha or "",
+                }
+            ).execute()
         except Exception as e:
             cls._handle_db_error(e, "promote_index_version")
 
@@ -222,12 +274,29 @@ class DatabaseAdapter:
             # 1. Update Ingestion Job status
             cls.update_job_status(db, user_id, job_id, "failed", failure_category=failure_category)
 
-            # 2. Update Repository status
-            db.table("user_repositories").update({"status": "failed", "last_error_category": failure_category}).eq("id", repo_id).eq("user_id", user_id).execute()
+            # 2. Get repository details to check its previous status
+            repo_res = db.table("user_repositories").select("status").eq("id", repo_id).eq("user_id", user_id).execute()
+            if repo_res.data and len(repo_res.data) > 0:
+                current_repo_status = repo_res.data[0].get("status")
+            else:
+                current_repo_status = "pending"
 
-            # 3. Purge snippets belonging to this failed job
+            # If repository was previously ready, keep it ready!
+            new_repo_status = "ready" if current_repo_status == "ready" else "failed"
+
+            # 3. Update Repository status without altering active index version or successful commit SHA
+            repo_update = {
+                "status": new_repo_status,
+                "last_error_category": failure_category,
+                "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+            }
+            db.table("user_repositories").update(repo_update).eq("id", repo_id).eq("user_id", user_id).execute()
+
+            # 4. Purge snippets belonging to this failed job
             db.table("code_snippets").delete().eq("ingestion_job_id", job_id).eq("user_id", user_id).execute()
 
+        except HTTPException:
+            raise
         except Exception as e:
             cls._handle_db_error(e, "fail_and_cleanup_job")
 

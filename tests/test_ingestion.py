@@ -287,10 +287,11 @@ def test_rate_limiter_map_size_eviction():
 @patch.object(indexer.CodeIndexer, "get_serverless_embedding")
 @patch.object(DatabaseAdapter, "resolve_user_repo")
 @patch.object(DatabaseAdapter, "create_ingestion_job")
+@patch.object(DatabaseAdapter, "update_repo_status")
 @patch.object(DatabaseAdapter, "update_job_status")
 @patch.object(DatabaseAdapter, "promote_index_version")
 def test_ingest_success_mocked(
-    mock_promote, mock_update, mock_create, mock_resolve,
+    mock_promote, mock_update_job, mock_update_repo, mock_create, mock_resolve,
     mock_get_embedding, mock_run_clone, mock_dns_safety, mock_db, client
 ):
     mock_dns_safety.return_value = True
@@ -333,10 +334,11 @@ def test_ingest_success_mocked(
 @patch("app.run_safe_git_clone")
 @patch.object(DatabaseAdapter, "resolve_user_repo")
 @patch.object(DatabaseAdapter, "create_ingestion_job")
+@patch.object(DatabaseAdapter, "update_repo_status")
 @patch.object(DatabaseAdapter, "update_job_status")
 @patch.object(DatabaseAdapter, "fail_and_cleanup_job")
 def test_ingest_clone_timeout(
-    mock_fail, mock_update, mock_create, mock_resolve,
+    mock_fail, mock_update_job, mock_update_repo, mock_create, mock_resolve,
     mock_run_clone, mock_dns_safety, mock_db, client
 ):
     mock_dns_safety.return_value = True
@@ -362,10 +364,11 @@ def test_ingest_clone_timeout(
 @patch.object(indexer.CodeIndexer, "get_serverless_embedding")
 @patch.object(DatabaseAdapter, "resolve_user_repo")
 @patch.object(DatabaseAdapter, "create_ingestion_job")
+@patch.object(DatabaseAdapter, "update_repo_status")
 @patch.object(DatabaseAdapter, "update_job_status")
 @patch.object(DatabaseAdapter, "fail_and_cleanup_job")
 def test_ingest_database_failure_rolls_back(
-    mock_fail, mock_update, mock_create, mock_resolve,
+    mock_fail, mock_update_job, mock_update_repo, mock_create, mock_resolve,
     mock_get_embedding, mock_run_clone, mock_dns_safety, mock_db, client
 ):
     mock_dns_safety.return_value = True

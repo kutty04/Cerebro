@@ -614,100 +614,117 @@ async def ingest_repo(ingest_req: IngestRequest, current_user: AuthenticatedUser
 
     concurrency_manager.acquire(user_id, canonical_url)
 
-    # 1. Resolve repository record
-    repo = DatabaseAdapter.resolve_user_repo(db, user_id, canonical_url)
-    repo_id = repo["id"]
-    repo_name = repo["repository_name"]
-
-    curr_ver = repo.get("active_index_version", "v1")
-    new_ver = "v2" if curr_ver == "v1" else "v1"
-
-    # 2. Create ingestion job
-    job_id = DatabaseAdapter.create_ingestion_job(db, user_id, repo_id, index_version=new_ver)
-    DatabaseAdapter.update_job_status(db, user_id, job_id, "cloning")
-
-    temp_dir = tempfile.mkdtemp(prefix="cerebro_ingest_")
-
     try:
-        logger.info(f"🚀 Ingesting repo: {canonical_url} for user: {user_id}")
+        # 1. Resolve repository record
+        repo = DatabaseAdapter.resolve_user_repo(db, user_id, canonical_url)
+        repo_id = repo["id"]
+        repo_name = repo["repository_name"]
+
+        curr_ver = repo.get("active_index_version", "v1")
+        new_ver = "v2" if curr_ver == "v1" else "v1"
+
+        # 2. Create ingestion job
+        job_id = DatabaseAdapter.create_ingestion_job(db, user_id, repo_id, index_version=new_ver)
+        DatabaseAdapter.update_repo_status(db, user_id, repo_id, "cloning")
+        DatabaseAdapter.update_job_status(db, user_id, job_id, "cloning")
+
+        temp_dir = tempfile.mkdtemp(prefix="cerebro_ingest_")
 
         try:
-            returncode = run_safe_git_clone(canonical_url, temp_dir, DEFAULT_LIMITS.MAX_REPO_CLONE_TIMEOUT_SEC)
-            if returncode != 0:
-                logger.error("Git clone returned non-zero exit code [op=ingest_clone, code=%d]", returncode)
+            logger.info(f"🚀 Ingesting repo: {canonical_url} for user: {user_id}")
+
+            try:
+                returncode = run_safe_git_clone(canonical_url, temp_dir, DEFAULT_LIMITS.MAX_REPO_CLONE_TIMEOUT_SEC)
+                if returncode != 0:
+                    logger.error("Git clone returned non-zero exit code [op=ingest_clone, code=%d]", returncode)
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Repository inaccessible, private, or not found.",
+                    )
+            except subprocess.TimeoutExpired:
+                logger.error("Git clone process timed out [op=ingest_clone]")
                 raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Repository inaccessible, private, or not found.",
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail="Repository clone timed out.",
                 )
-        except subprocess.TimeoutExpired:
-            logger.error("Git clone process timed out [op=ingest_clone]")
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail="Repository clone timed out.",
-            )
 
-        try:
-            total_disk_bytes = get_dir_size_bytes(temp_dir)
-            if total_disk_bytes > DEFAULT_LIMITS.MAX_REPO_DISK_SIZE_BYTES:
+            try:
+                total_disk_bytes = get_dir_size_bytes(temp_dir)
+                if total_disk_bytes > DEFAULT_LIMITS.MAX_REPO_DISK_SIZE_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="Repository exceeds maximum disk size limit (50MB). Consider narrowing scope.",
+                    )
+            except HTTPException:
+                raise
+            except Exception as disk_e:
+                logger.error("Disk size check failed [op=ingest_disk_scan, exc_type=%s]", type(disk_e).__name__)
                 raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail="Repository exceeds maximum disk size limit (50MB). Consider narrowing scope.",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to inspect repository filesystem.",
                 )
-        except HTTPException:
-            raise
-        except Exception as disk_e:
-            logger.error("Disk size check failed [op=ingest_disk_scan, exc_type=%s]", type(disk_e).__name__)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to inspect repository filesystem.",
+
+            DatabaseAdapter.update_repo_status(db, user_id, repo_id, "indexing")
+            DatabaseAdapter.update_job_status(db, user_id, job_id, "indexing")
+
+            indexer = CodeIndexer(
+                repos_path=temp_dir,
+                repo_url=canonical_url,
+                repo_name=repo_name,
+                limits=DEFAULT_LIMITS,
+                repository_id=repo_id,
+                ingestion_job_id=job_id,
+                index_version=new_ver,
             )
+            indexer.db = db
+            indexer.user_id = user_id
 
-        DatabaseAdapter.update_job_status(db, user_id, job_id, "indexing")
+            snippets = indexer.scan_repos()
+            if not snippets:
+                DatabaseAdapter.update_job_status(db, user_id, job_id, "completed", inserted_chunk_count=0)
+                DatabaseAdapter.update_repo_status(db, user_id, repo_id, "ready")
+                return {
+                    "status": "success",
+                    "message": "No indexable code found in repository",
+                    "indexed_count": 0,
+                }
 
-        indexer = CodeIndexer(
-            repos_path=temp_dir,
-            repo_url=canonical_url,
-            repo_name=repo_name,
-            limits=DEFAULT_LIMITS,
-            repository_id=repo_id,
-            ingestion_job_id=job_id,
-            index_version=new_ver,
-        )
-        indexer.db = db
-        indexer.user_id = user_id
-
-        snippets = indexer.scan_repos()
-        if not snippets:
-            DatabaseAdapter.update_job_status(db, user_id, job_id, "completed", inserted_chunk_count=0)
+            inserted_snippet_ids = indexer.index_snippets(snippets)
+            
+            # 3. Promote index version
             DatabaseAdapter.promote_index_version(db, user_id, repo_id, job_id, new_version=new_ver)
+            invalidate_user_repo_cache(user_id, repo_name)
+
             return {
                 "status": "success",
-                "message": "No indexable code found in repository",
-                "indexed_count": 0,
+                "message": f"Successfully indexed {len(inserted_snippet_ids)} snippets from {canonical_url}",
+                "indexed_count": len(inserted_snippet_ids),
             }
 
-        inserted_snippet_ids = indexer.index_snippets(snippets)
-        
-        # 3. Promote index version
-        DatabaseAdapter.promote_index_version(db, user_id, repo_id, job_id, new_version=new_ver)
-        invalidate_user_repo_cache(user_id, repo_name)
+        except HTTPException as he:
+            DatabaseAdapter.fail_and_cleanup_job(db, user_id, repo_id, job_id, failure_category="HTTP_" + str(he.status_code))
+            raise
+        except Exception as e:
+            logger.error("Ingestion failed unexpectedly [op=ingest_repo, exc_type=%s]", type(e).__name__)
+            DatabaseAdapter.fail_and_cleanup_job(db, user_id, repo_id, job_id, failure_category=type(e).__name__)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Ingestion failed due to an internal error.",
+            )
+        finally:
+            def onerror(func, path, exc_info):
+                import stat
+                if not os.access(path, os.W_OK):
+                    os.chmod(path, stat.S_IWUSR)
+                    func(path)
+                else:
+                    raise
 
-        return {
-            "status": "success",
-            "message": f"Successfully indexed {len(inserted_snippet_ids)} snippets from {canonical_url}",
-            "indexed_count": len(inserted_snippet_ids),
-        }
-
-    except HTTPException as he:
-        DatabaseAdapter.fail_and_cleanup_job(db, user_id, repo_id, job_id, failure_category="HTTP_" + str(he.status_code))
-        raise
-    except Exception as e:
-        logger.error("Ingestion failed unexpectedly [op=ingest_repo, exc_type=%s]", type(e).__name__)
-        DatabaseAdapter.fail_and_cleanup_job(db, user_id, repo_id, job_id, failure_category=type(e).__name__)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Ingestion failed due to an internal error.",
-        )
+            try:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, onerror=onerror)
+            except Exception as cleanup_e:
+                logger.warning("Cleanup failed [op=ingest_cleanup, exc_type=%s]", type(cleanup_e).__name__)
     finally:
         concurrency_manager.release(user_id, canonical_url)
 
