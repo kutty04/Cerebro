@@ -2,8 +2,7 @@ import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { Maximize2, Table2, Share2, AlertTriangle } from 'lucide-react';
 import { fetchGraphData } from '../services';
 
-/* react-force-graph-2d is chunked separately */
-const ForceGraph2D = lazy(() => import('react-force-graph-2d'));
+import ForceGraph2D from 'react-force-graph-2d';
 
 export default function NeuralMap({ userId }) {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
@@ -140,46 +139,39 @@ export default function NeuralMap({ userId }) {
       {/* Graph view */}
       {!loading && !error && !isEmpty && viewMode === 'graph' && (
         <div className="nm-graph-container" aria-label="Repository-to-file knowledge graph. Use Table view for an accessible alternative.">
-          <Suspense fallback={
-            <div className="loading-panel" role="status">
-              <div className="loading-spinner" aria-hidden="true" />
-              <span>Loading graph renderer…</span>
-            </div>
-          }>
-            <ForceGraph2D
-              ref={fgRef}
-              graphData={graphData}
-              nodeLabel="name"
-              nodeCanvasObjectMode={() => 'after'}
-              nodeCanvasObject={(node, ctx, globalScale) => {
-                const label = node.name || '';
-                const size = node.val || 5;
-                const scale = globalScale || 1.0;
-                
-                // Draw text labels with scale-invariant rendering
-                const labelFontSize = 10 / (scale > 0 ? scale : 1.0);
-                ctx.font = `${labelFontSize}px Outfit, Inter, sans-serif`;
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
+          <ForceGraph2D
+            ref={fgRef}
+            graphData={graphData}
+            nodeLabel="name"
+            nodeCanvasObjectMode={() => 'after'}
+            nodeCanvasObject={(node, ctx, globalScale) => {
+              const label = node.name || '';
+              const size = node.val || 5;
+              const scale = globalScale || 1.0;
+              
+              // Draw text labels with scale-invariant rendering
+              const labelFontSize = 10 / (scale > 0 ? scale : 1.0);
+              ctx.font = `${labelFontSize}px Outfit, Inter, sans-serif`;
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
 
-                // 1. Draw a dark outline behind the text for high contrast
-                ctx.strokeStyle = '#07090f';
-                ctx.lineWidth = 3 / (scale > 0 ? scale : 1.0);
-                ctx.strokeText(label, node.x, node.y + size + (labelFontSize * 0.7));
+              // 1. Draw a dark outline behind the text for high contrast
+              ctx.strokeStyle = '#07090f';
+              ctx.lineWidth = 3 / (scale > 0 ? scale : 1.0);
+              ctx.strokeText(label, node.x, node.y + size + (labelFontSize * 0.7));
 
-                // 2. Draw the actual light text
-                ctx.fillStyle = '#e2e8f0';
-                ctx.fillText(label, node.x, node.y + size + (labelFontSize * 0.7));
-              }}
-              nodeColor={(node) => node.color || '#38bdf8'}
-              nodeVal={(node) => node.val || 5}
-              linkColor={() => 'rgba(56, 189, 248, 0.2)'}
-              linkWidth={1.5}
-              backgroundColor="transparent"
-              enableNodeDrag={true}
-              enableZoom={true}
-            />
-          </Suspense>
+              // 2. Draw the actual light text
+              ctx.fillStyle = '#e2e8f0';
+              ctx.fillText(label, node.x, node.y + size + (labelFontSize * 0.7));
+            }}
+            nodeColor={(node) => node.color || '#38bdf8'}
+            nodeVal={(node) => node.val || 5}
+            linkColor={() => 'rgba(56, 189, 248, 0.2)'}
+            linkWidth={1.5}
+            backgroundColor="transparent"
+            enableNodeDrag={true}
+            enableZoom={true}
+          />
         </div>
       )}
 
