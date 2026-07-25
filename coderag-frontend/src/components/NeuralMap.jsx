@@ -127,8 +127,8 @@ export default function NeuralMap({ userId }) {
         repoNode,
         files
       };
-    }).filter(cluster => cluster.files.length > 0 || selectedRepo === cluster.repoNode.id);
-  }, [filteredNodes, selectedRepo]);
+    });
+  }, [filteredNodes]);
 
   /* Node click handler */
   const handleNodeClick = (node) => {
@@ -433,6 +433,20 @@ function SvgRepositoryCard({ cluster, selectedNode, hoveredNode, onNodeClick, on
           stroke="rgba(129, 140, 248, 0.3)"
           strokeWidth="1.5"
         />
+
+        {/* Empty Files Placeholder in Card */}
+        {files.length === 0 && (
+          <text
+            x={hubX}
+            y={headerHeight + 24}
+            fill="#94a3b8"
+            fontSize="12.5"
+            fontFamily="Outfit, Inter, sans-serif"
+            textAnchor="middle"
+          >
+            Repository registered • Indexed files will appear here
+          </text>
+        )}
 
         {/* File Node Grid & Connector Lines */}
         {files.map((file, idx) => {
