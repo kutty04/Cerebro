@@ -1,11 +1,10 @@
 -- SQL Function for CodeRAG Vector Search
 -- Run this in your Supabase SQL Editor after creating the code_snippets table
 
--- Create or update function to search code snippets by embedding similarity with user scoping support
+-- Create a function to search code snippets by embedding similarity
 CREATE OR REPLACE FUNCTION search_code_snippets(
   query_embedding vector(384),
-  match_count int DEFAULT 5,
-  p_user_id text DEFAULT NULL
+  match_count int DEFAULT 5
 )
 RETURNS TABLE (
   id bigint,
@@ -28,7 +27,6 @@ BEGIN
     (1 - (code_snippets.embedding <=> query_embedding))::float4 as similarity
   FROM code_snippets
   WHERE code_snippets.embedding IS NOT NULL
-    AND (p_user_id IS NULL OR code_snippets.user_id = p_user_id)
   ORDER BY code_snippets.embedding <=> query_embedding
   LIMIT match_count;
 END;

@@ -2,517 +2,129 @@ import sqlite3
 import time
 import json
 import hashlib
-import uuid
-import datetime
-import logging
-from typing import List, Dict, Optional, Any
+from typing import List, Dict
 
 DB_PATH = "coderag_telemetry.db"
-logger = logging.getLogger(__name__)
-
-
-def prune_old_telemetry_conn(conn: sqlite3.Connection):
-    """Prunes old telemetry data using an active connection."""
-    try:
-        # 1. Prune cache older than 1 day
-        conn.execute("DELETE FROM query_cache WHERE timestamp < datetime('now', '-1 day')")
-        # 2. Prune search logs older than 30 days
-        conn.execute("DELETE FROM search_logs WHERE timestamp < datetime('now', '-30 days')")
-        # 3. Prune chat messages older than 30 days
-        conn.execute("DELETE FROM chat_messages WHERE timestamp < datetime('now', '-30 days')")
-        # 4. Prune conversations older than 30 days based on updated_at
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM conversations WHERE updated_at < datetime('now', '-30 days')")
-        old_conv_ids = [row[0] for row in cursor.fetchall()]
-        if old_conv_ids:
-            placeholders = ",".join("?" * len(old_conv_ids))
-            conn.execute(f"DELETE FROM chat_messages WHERE conversation_id IN ({placeholders})", old_conv_ids)
-            conn.execute(f"DELETE FROM conversations WHERE id IN ({placeholders})", old_conv_ids)
-    except Exception as e:
-        logger.error("Telemetry pruning connection failed [op=prune_conn, exc_type=%s]", type(e).__name__)
-
 
 def init_db():
-    """
-    Initializes SQLite telemetry DB and safely performs idempotent schema migrations
-    to support versioned conversations, chat messages, search logs, and query cache.
-    """
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS search_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query TEXT,
+                repo_filter TEXT,
+                confidence INTEGER,
+                latency_ms REAL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT,
+                query TEXT,
+                answer TEXT,
+                context_json TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS query_cache (
+                query_hash TEXT PRIMARY KEY,
+                answer TEXT,
+                sources_json TEXT,
+                confidence INTEGER,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+def get_cache_key(query: str, repo_filter: str) -> str:
+    raw = f"{query}_{repo_filter or 'ALL'}"
+    return hashlib.md5(raw.encode()).hexdigest()
+
+def get_cached_query(query: str, repo_filter: str):
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            # Table 1: Conversations (Server-side UUID threads)
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    repo_filter TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # Table 2: Chat Messages (Associated with conversations and user_id)
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS chat_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    conversation_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    sources_json TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(conversation_id) REFERENCES conversations(id)
-                )
-            ''')
-
-            # Table 3: Search Logs
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS search_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    query TEXT,
-                    repo_filter TEXT,
-                    confidence INTEGER,
-                    latency_ms REAL,
-                    user_id TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # Table 4: Query Cache (Multi-dimensional SHA-256 payload key)
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS query_cache (
-                    query_hash TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    repo_filter TEXT,
-                    answer TEXT NOT NULL,
-                    sources_json TEXT,
-                    confidence INTEGER,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-
-            # Create Indexes for fast user-scoped queries
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_conv_user ON chat_messages(conversation_id, user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_search_logs_user ON search_logs(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_query_cache_user_repo ON query_cache(user_id, repo_filter)")
-
-            # Migration: Ensure columns exist if upgraded from older schema
-            cursor = conn.cursor()
-            cursor.execute("PRAGMA table_info(search_logs)")
-            cols = [row[1] for row in cursor.fetchall()]
-            if "user_id" not in cols:
-                conn.execute("ALTER TABLE search_logs ADD COLUMN user_id TEXT")
-
-            # Create schema_version table
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS schema_version (
-                    version INTEGER PRIMARY KEY
-                )
-            ''')
-
-            # Ensure response_json column exists in query_cache
-            cursor.execute("PRAGMA table_info(query_cache)")
-            cache_cols = [row[1] for row in cursor.fetchall()]
-            if "response_json" not in cache_cols:
-                conn.execute("ALTER TABLE query_cache ADD COLUMN response_json TEXT")
-
-            # Initialize version tracking
-            cursor.execute("SELECT COUNT(*) FROM schema_version")
-            if cursor.fetchone()[0] == 0:
-                conn.execute("INSERT INTO schema_version (version) VALUES (1)")
-            else:
-                conn.execute("UPDATE schema_version SET version = 1")
-
-            # Prune old telemetry on database initialization
-            prune_old_telemetry_conn(conn)
-
-    except Exception as e:
-        logger.error("Telemetry database init failed [op=init_db, exc_type=%s]", type(e).__name__)
-
-
-# Auto-initialize database on module import
-init_db()
-
-
-
-def get_cache_key(
-    query: str,
-    user_id: str,
-    repo_filter: Optional[str] = None,
-    model: str = "meta-llama/Llama-3.1-8B-Instruct",
-    index_version: str = "v1",
-    top_k: int = 5,
-    retrieval_strategy: str = "hybrid_v1",
-    prompt_version: str = "v1",
-    history: Optional[List[Dict[str, Any]]] = None,
-) -> str:
-    """
-    Computes a canonical SHA-256 cache key using deterministic JSON payload serialization.
-    Enforces multi-dimensional isolation across query, repo, model, index, strategy, top_k, prompt, and conversation context.
-    """
-    context_str = json.dumps(history or [], sort_keys=True)
-    context_hash = hashlib.sha256(context_str.encode("utf-8")).hexdigest()
-
-    payload = {
-        "version": "v1",
-        "user_id": user_id,
-        "repo_filter": repo_filter or "ALL",
-        "normalized_query": query.strip().lower(),
-        "model": model,
-        "index_version": index_version,
-        "top_k": top_k,
-        "retrieval_strategy": retrieval_strategy,
-        "prompt_version": prompt_version,
-        "context_hash": context_hash,
-    }
-    canonical_str = json.dumps(payload, sort_keys=True)
-    return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
-
-
-def get_cached_query(
-    query: str,
-    user_id: str,
-    repo_filter: Optional[str] = None,
-    model: str = "meta-llama/Llama-3.1-8B-Instruct",
-    index_version: str = "v1",
-    top_k: int = 5,
-    retrieval_strategy: str = "hybrid_v1",
-    prompt_version: str = "v1",
-    history: Optional[List[Dict[str, Any]]] = None,
-):
-    """
-    Reads query cache strictly matching canonical SHA-256 hash and user_id (valid for 24 hours).
-    Supports schema-versioned response_json and safe fallbacks for legacy query formats.
-    """
-    if not user_id:
-        return None
-
-    try:
-        key = get_cache_key(
-            query=query,
-            user_id=user_id,
-            repo_filter=repo_filter,
-            model=model,
-            index_version=index_version,
-            top_k=top_k,
-            retrieval_strategy=retrieval_strategy,
-            prompt_version=prompt_version,
-            history=history,
-        )
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
+            # Cache expires after 24 hours
             cursor.execute('''
-                SELECT answer, sources_json, response_json, confidence 
+                SELECT answer, sources_json, confidence 
                 FROM query_cache 
-                WHERE query_hash = ? AND user_id = ? AND timestamp >= datetime('now', '-1 day')
-            ''', (key, user_id))
+                WHERE query_hash = ? AND timestamp >= datetime('now', '-1 day')
+            ''', (get_cache_key(query, repo_filter),))
             row = cursor.fetchone()
             if row:
-                # 1. Try to read from schema-versioned response_json
-                if row["response_json"]:
-                    try:
-                        resp = json.loads(row["response_json"])
-                        if isinstance(resp, dict) and resp.get("cache_schema_version") == "grounded-response-v1":
-                            return {
-                                "answer": resp.get("answer"),
-                                "sources": resp.get("sources"),
-                                "summary": resp.get("summary"),
-                                "limitations": resp.get("limitations", []),
-                                "metadata": resp.get("metadata"),
-                                "follow_ups": resp.get("follow_ups", []),
-                                "confidence": row["confidence"]
-                            }
-                        else:
-                            # Schema version change produces a cache miss
-                            return None
-                    except Exception:
-                        return None
-
-                # 2. Legacy fallback check
-                sources_str = row["sources_json"]
-                if sources_str:
-                    stripped = sources_str.strip()
-                    if stripped.startswith("["):
-                        try:
-                            sources_data = json.loads(stripped)
-                            if isinstance(sources_data, list):
-                                return {
-                                    "answer": row["answer"],
-                                    "sources": sources_data,
-                                    "summary": None,
-                                    "limitations": [],
-                                    "metadata": None,
-                                    "follow_ups": [],
-                                    "confidence": row["confidence"]
-                                }
-                        except Exception:
-                            pass
-                    elif stripped.startswith("{"):
-                        # Mixed legacy data inside sources_json produces a cache miss
-                        return None
+                return {
+                    "answer": row["answer"],
+                    "sources": json.loads(row["sources_json"]),
+                    "confidence": row["confidence"]
+                }
     except Exception as e:
-        logger.error("Telemetry cache read failed [op=cache_read, exc_type=%s]", type(e).__name__)
+        print(f"Cache Read Error: {e}")
     return None
 
-
-def set_cached_query(
-    query: str,
-    user_id: str,
-    answer: str,
-    sources: list,
-    confidence: int,
-    repo_filter: Optional[str] = None,
-    model: str = "meta-llama/Llama-3.1-8B-Instruct",
-    index_version: str = "v1",
-    top_k: int = 5,
-    retrieval_strategy: str = "hybrid_v1",
-    prompt_version: str = "v1",
-    history: Optional[List[Dict[str, Any]]] = None,
-    summary: Optional[str] = None,
-    limitations: Optional[list] = None,
-    metadata: Optional[dict] = None,
-    follow_ups: Optional[list] = None,
-):
-    """
-    Writes query cache strictly scoped by canonical SHA-256 hash and authenticated user_id.
-    Stores the server-derived sources array in sources_json and the complete validated
-    grounded response in response_json.
-    """
-    if not user_id:
-        return
-
-    try:
-        key = get_cache_key(
-            query=query,
-            user_id=user_id,
-            repo_filter=repo_filter,
-            model=model,
-            index_version=index_version,
-            top_k=top_k,
-            retrieval_strategy=retrieval_strategy,
-            prompt_version=prompt_version,
-            history=history,
-        )
-        
-        response_data = {
-            "cache_schema_version": "grounded-response-v1",
-            "answer": answer,
-            "summary": summary,
-            "sources": sources,
-            "follow_ups": follow_ups or [],
-            "limitations": limitations or [],
-            "metadata": metadata or {}
-        }
-        
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute('''
-                INSERT OR REPLACE INTO query_cache (query_hash, user_id, repo_filter, answer, sources_json, response_json, confidence)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (key, user_id, repo_filter or "ALL", answer, json.dumps(sources), json.dumps(response_data), confidence))
-    except Exception as e:
-        logger.error("Telemetry cache write failed [op=cache_write, exc_type=%s]", type(e).__name__)
-
-
-def invalidate_user_repo_cache(user_id: str, repo_filter: Optional[str] = None):
-    """
-    Purges cache entries owned by user_id (and optionally matching repo_filter)
-    upon repository re-indexing or repository deletion.
-    """
-    if not user_id:
-        return
-
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            if repo_filter:
-                conn.execute("DELETE FROM query_cache WHERE user_id = ? AND repo_filter = ?", (user_id, repo_filter))
-            else:
-                conn.execute("DELETE FROM query_cache WHERE user_id = ?", (user_id,))
-            logger.info("Invalidated cache entries for user [op=cache_invalidate]")
-    except Exception as e:
-        logger.error("Telemetry cache invalidation failed [op=cache_invalidate, exc_type=%s]", type(e).__name__)
-
-
-# ----------------------------------------------------------------------
-# CONVERSATION THREAD MANAGEMENT
-# ----------------------------------------------------------------------
-
-def create_conversation(user_id: str, repo_filter: Optional[str] = None) -> str:
-    """Creates a new server-side conversation thread UUID for the authenticated user."""
-    conv_id = str(uuid.uuid4())
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO conversations (id, user_id, repo_filter, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                (conv_id, user_id, repo_filter or "ALL", now, now)
-            )
-    except Exception as e:
-        logger.error("Failed to create conversation [op=create_conversation, exc_type=%s]", type(e).__name__)
-    return conv_id
-
-
-def verify_and_get_conversation(conv_id: str, user_id: str) -> Optional[Dict]:
-    """
-    Verifies that a conversation thread exists and belongs strictly to user_id.
-    Returns conversation metadata if valid, or None if unknown or owned by another user.
-    """
-    if not conv_id or not user_id:
-        return None
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id, user_id, repo_filter, created_at, updated_at FROM conversations WHERE id = ? AND user_id = ?",
-                (conv_id, user_id)
-            )
-            row = cursor.fetchone()
-            return dict(row) if row else None
-    except Exception as e:
-        logger.error("Failed to verify conversation [op=verify_conversation, exc_type=%s]", type(e).__name__)
-        return None
-
-
-def add_message_to_conversation(conv_id: str, user_id: str, role: str, content: str, sources: Optional[List[dict]] = None):
-    """Appends a message to a conversation thread and updates the updated_at timestamp."""
-    try:
-        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "INSERT INTO chat_messages (conversation_id, user_id, role, content, sources_json) VALUES (?, ?, ?, ?, ?)",
-                (conv_id, user_id, role, content, json.dumps(sources or []))
-            )
-            conn.execute(
-                "UPDATE conversations SET updated_at = ? WHERE id = ? AND user_id = ?",
-                (now, conv_id, user_id)
-            )
-    except Exception as e:
-        logger.error("Failed to add message to conversation [op=add_message, exc_type=%s]", type(e).__name__)
-
-
-def get_conversation_messages(conv_id: str, user_id: str, limit: int = 12) -> List[Dict]:
-    """Retrieves up to `limit` recent messages from a conversation owned by user_id."""
-    if not verify_and_get_conversation(conv_id, user_id):
-        return []
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id, conversation_id, role, content, sources_json, timestamp FROM chat_messages "
-                "WHERE conversation_id = ? AND user_id = ? ORDER BY id ASC LIMIT ?",
-                (conv_id, user_id, limit)
-            )
-            return [dict(row) for row in cursor.fetchall()]
-    except Exception as e:
-        logger.error("Failed to fetch conversation messages [op=get_messages, exc_type=%s]", type(e).__name__)
-        return []
-
-
-def log_search(query: str, repo_filter: Optional[str], confidence: int, latency_ms: float, user_id: Optional[str] = None):
+def set_cached_query(query: str, repo_filter: str, answer: str, sources: list, confidence: int):
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute('''
-                INSERT INTO search_logs (query, repo_filter, confidence, latency_ms, user_id)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (query, str(repo_filter) if repo_filter else "ALL", confidence, latency_ms, user_id))
+                INSERT OR REPLACE INTO query_cache (query_hash, answer, sources_json, confidence)
+                VALUES (?, ?, ?, ?)
+            ''', (get_cache_key(query, repo_filter), answer, json.dumps(sources), confidence))
     except Exception as e:
-        logger.error("Telemetry search logging failed [op=log_search, exc_type=%s]", type(e).__name__)
+        print(f"Cache Write Error: {e}")
 
+def log_search(query: str, repo_filter: str, confidence: int, latency_ms: float):
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute('''
+                INSERT INTO search_logs (query, repo_filter, confidence, latency_ms)
+                VALUES (?, ?, ?, ?)
+            ''', (query, str(repo_filter) if repo_filter else "ALL", confidence, latency_ms))
+    except Exception as e:
+        print(f"Telemetry Error: {e}")
 
-def get_analytics(user_id: str) -> Dict:
-    """
-    Fetches search statistics strictly scoped by authenticated user_id.
-    Quarantines/ignores legacy unscoped rows.
-    """
-    if not user_id:
-        return {"total_searches": 0, "avg_latency_ms": 0.0, "avg_confidence": 0.0, "recent_queries": []}
+def save_chat(thread_id: str, query: str, answer: str, sources: List[dict]):
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute('''
+                INSERT INTO chat_history (thread_id, query, answer, context_json)
+                VALUES (?, ?, ?, ?)
+            ''', (thread_id, query, answer, json.dumps(sources)))
+    except Exception as e:
+        print(f"Chat Save Error: {e}")
 
+def get_analytics() -> Dict:
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-
-            cursor.execute(
-                "SELECT COUNT(*) as total_searches, AVG(latency_ms) as avg_latency, AVG(confidence) as avg_conf "
-                "FROM search_logs WHERE user_id = ?",
-                (user_id,)
-            )
-            stats = dict(cursor.fetchone() or {})
-
-            cursor.execute(
-                "SELECT query, confidence, latency_ms, timestamp FROM search_logs "
-                "WHERE user_id = ? ORDER BY id DESC LIMIT 10",
-                (user_id,)
-            )
+            
+            # Basic stats
+            cursor.execute("SELECT COUNT(*) as total_searches, AVG(latency_ms) as avg_latency, AVG(confidence) as avg_conf FROM search_logs")
+            stats = dict(cursor.fetchone())
+            
+            # Recent queries
+            cursor.execute("SELECT query, confidence, latency_ms, timestamp FROM search_logs ORDER BY id DESC LIMIT 10")
             recent = [dict(row) for row in cursor.fetchall()]
-
+            
             return {
-                "total_searches": stats.get("total_searches") or 0,
-                "avg_latency_ms": round(stats.get("avg_latency") or 0.0, 2),
-                "avg_confidence": round(stats.get("avg_conf") or 0.0, 2),
-                "recent_queries": recent,
+                "total_searches": stats["total_searches"] or 0,
+                "avg_latency_ms": round(stats["avg_latency"] or 0, 2),
+                "avg_confidence": round(stats["avg_conf"] or 0, 2),
+                "recent_queries": recent
             }
     except Exception as e:
-        logger.error("Telemetry analytics fetch failed [op=get_analytics, exc_type=%s]", type(e).__name__)
-        return {"total_searches": 0, "avg_latency_ms": 0.0, "avg_confidence": 0.0, "recent_queries": []}
+        print(f"Analytics Error: {e}")
+        return {}
 
-
-def get_chat_history(user_id: str) -> List[Dict]:
-    """
-    Fetches recent conversations and messages strictly scoped by authenticated user_id.
-    """
-    if not user_id:
-        return []
-
+def get_chat_history() -> List[Dict]:
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id, conversation_id, role, content, timestamp FROM chat_messages "
-                "WHERE user_id = ? ORDER BY id DESC LIMIT 50",
-                (user_id,)
-            )
+            cursor.execute("SELECT id, query, answer, timestamp FROM chat_history ORDER BY id DESC LIMIT 50")
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
-        logger.error("Telemetry history fetch failed [op=get_chat_history, exc_type=%s]", type(e).__name__)
+        print(f"History Error: {e}")
         return []
-
-
-
-def prune_old_telemetry():
-    """Exposes pruning of telemetry database entries externally using a new connection."""
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            prune_old_telemetry_conn(conn)
-    except Exception as e:
-        logger.error("Telemetry pruning failed [op=prune_old_telemetry, exc_type=%s]", type(e).__name__)
-
-
-def delete_user_repo_telemetry(user_id: str, repo_filter: str):
-    """
-    Deletes all local telemetry data (cache, conversations, chat messages, search logs)
-    associated with a specific user and repository filter.
-    """
-    if not user_id or not repo_filter:
-        return
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            # 1. Delete matching search logs
-            conn.execute("DELETE FROM search_logs WHERE user_id = ? AND repo_filter = ?", (user_id, repo_filter))
-            # 2. Delete conversations and their chat messages
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM conversations WHERE user_id = ? AND repo_filter = ?", (user_id, repo_filter))
-            conv_ids = [row[0] for row in cursor.fetchall()]
-            if conv_ids:
-                placeholders = ",".join("?" * len(conv_ids))
-                conn.execute(f"DELETE FROM chat_messages WHERE conversation_id IN ({placeholders}) AND user_id = ?", (*conv_ids, user_id))
-                conn.execute(f"DELETE FROM conversations WHERE id IN ({placeholders}) AND user_id = ?", (*conv_ids, user_id))
-            # 3. Purge cache
-            conn.execute("DELETE FROM query_cache WHERE user_id = ? AND repo_filter = ?", (user_id, repo_filter))
-            logger.info("Successfully purged telemetry data for user and repo [op=telemetry_purge]")
-    except Exception as e:
-        logger.error("Telemetry user repo purge failed [op=telemetry_purge, exc_type=%s]", type(e).__name__)
-

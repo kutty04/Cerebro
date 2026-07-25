@@ -1,23 +1,11 @@
 {
-  "name": "cerebro-workspace-ui",
+  "name": "coderag-frontend",
   "private": true,
-  "version": "1.0.0",
-  "description": "Premium React workspace UI for Cerebro CodeRAG repository intelligence engine",
-  "keywords": [
-    "coderag",
-    "retrieval-augmented-generation",
-    "codebase-intelligence",
-    "supabase",
-    "huggingface",
-    "react",
-    "fastapi"
-  ],
-  "license": "MIT",
+  "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port 3000",
     "build": "vite build",
-    "test": "node --test src/apiClient.test.js",
     "lint": "eslint .",
     "preview": "vite preview"
   },
