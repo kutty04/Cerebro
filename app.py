@@ -1281,7 +1281,7 @@ async def get_graph_data(
         seen_repos = set()
         seen_files = set()
 
-        nodes.append({"id": "ME", "name": "Neural Core", "val": 15, "color": "#38bdf8"})
+        nodes.append({"id": "ME", "name": "Neural Core", "val": 15, "color": "#38bdf8", "type": "core", "group": "Neural Core"})
 
         for item in (result.data or []):
             repo = item.get("repo_name")
@@ -1290,13 +1290,21 @@ async def get_graph_data(
                 continue
 
             if repo not in seen_repos:
-                nodes.append({"id": repo, "name": repo, "val": 10, "color": "#818cf8"})
+                nodes.append({"id": repo, "name": repo, "val": 10, "color": "#818cf8", "type": "repo", "group": repo})
                 links.append({"source": "ME", "target": repo})
                 seen_repos.add(repo)
 
             file_id = f"{repo}:{file}"
             if file_id not in seen_files:
-                nodes.append({"id": file_id, "name": file.split("/")[-1], "val": 4, "color": "#94a3b8"})
+                nodes.append({
+                    "id": file_id,
+                    "name": file.split("/")[-1],
+                    "full_path": file,
+                    "group": repo,
+                    "type": "file",
+                    "val": 4,
+                    "color": "#94a3b8"
+                })
                 links.append({"source": repo, "target": file_id})
                 seen_files.add(file_id)
 

@@ -1180,14 +1180,184 @@
 
 .nm-center-btn { font-size: 0.8rem; padding: var(--cb-sp-1) var(--cb-sp-3); }
 
+.nm-graph-wrapper {
+  display: flex;
+  gap: var(--cb-sp-4);
+  position: relative;
+  min-height: 520px;
+}
 .nm-graph-container {
   flex: 1;
-  min-height: 500px;
-  background: var(--cb-bg-card);
-  border: 1px solid var(--cb-border);
+  min-height: 520px;
+  background: rgba(13, 17, 23, 0.6);
+  border: 1px solid rgba(34, 211, 238, 0.2);
   border-radius: var(--cb-radius-lg);
   overflow: hidden;
   position: relative;
+  backdrop-filter: blur(12px);
+}
+
+.nm-controls-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cb-sp-3);
+  margin-bottom: var(--cb-sp-4);
+  padding: var(--cb-sp-3) var(--cb-sp-4);
+  background: rgba(13, 17, 23, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--cb-radius-md);
+  backdrop-filter: blur(8px);
+}
+.nm-control-group {
+  display: flex;
+  align-items: center;
+  gap: var(--cb-sp-2);
+}
+.nm-control-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--cb-text-2);
+}
+.nm-select-input {
+  padding: 4px 10px;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--cb-radius-sm);
+  color: #22d3ee;
+  font-size: 0.82rem;
+  font-weight: 500;
+  outline: none;
+  cursor: pointer;
+}
+.nm-select-input:focus-visible {
+  border-color: #22d3ee;
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.2);
+}
+.nm-search-group {
+  position: relative;
+  margin-left: auto;
+  min-width: 220px;
+}
+.nm-search-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--cb-text-3);
+  pointer-events: none;
+}
+.nm-search-input {
+  width: 100%;
+  padding: 5px 10px 5px 30px;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--cb-radius-sm);
+  color: #ffffff;
+  font-size: 0.82rem;
+  outline: none;
+}
+.nm-search-input:focus {
+  border-color: #22d3ee;
+}
+
+/* Side details panel */
+.nm-details-panel {
+  width: 280px;
+  background: rgba(13, 17, 23, 0.85);
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  border-radius: var(--cb-radius-lg);
+  padding: var(--cb-sp-4);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--cb-sp-3);
+  animation: fadeInRight 0.2s ease-out;
+}
+@keyframes fadeInRight {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.nm-details-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.nm-node-badge {
+  padding: 2px 8px;
+  border-radius: 100px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.badge-repo { background: rgba(129, 140, 248, 0.2); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.4); }
+.badge-core { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }
+.badge-file { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.4); }
+.nm-details-close {
+  background: transparent;
+  border: none;
+  color: var(--cb-text-2);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+}
+.nm-details-close:hover { color: var(--cb-text); background: rgba(255,255,255,0.1); }
+.nm-details-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #ffffff;
+  word-break: break-word;
+  margin: 0;
+}
+.nm-details-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cb-sp-3);
+  font-size: 0.82rem;
+}
+.nm-details-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.nm-field-label {
+  font-size: 0.75rem;
+  color: var(--cb-text-3);
+  font-weight: 500;
+}
+.nm-field-val {
+  color: var(--cb-text);
+  font-weight: 500;
+}
+.nm-field-id {
+  font-family: 'Fira Code', monospace;
+  font-size: 0.75rem;
+  color: var(--cb-text-2);
+  word-break: break-all;
+}
+.nm-field-path-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nm-field-code {
+  font-family: 'Fira Code', monospace;
+  font-size: 0.78rem;
+  color: #22d3ee;
+  background: rgba(15, 23, 42, 0.8);
+  padding: 4px 6px;
+  border-radius: 4px;
+  word-break: break-all;
+  flex: 1;
+}
+.nm-cell-path code {
+  font-family: 'Fira Code', monospace;
+  font-size: 0.8rem;
+  color: #22d3ee;
 }
 
 /* ── Table fallback ── */
