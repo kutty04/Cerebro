@@ -192,13 +192,14 @@ BEGIN
   RETURN QUERY
   SELECT
     code_snippets.id,
-    code_snippets.repo_name,
+    user_repositories.repo_name,
     code_snippets.file_path,
     code_snippets.language,
     code_snippets.code_content,
     code_snippets.source_url,
     (1 - (code_snippets.embedding <=> query_embedding))::float4 as similarity
   FROM code_snippets
+  INNER JOIN user_repositories ON code_snippets.repository_id = user_repositories.id
   WHERE code_snippets.embedding IS NOT NULL
     AND code_snippets.user_id = effective_user_id
     AND (p_repository_id IS NULL OR code_snippets.repository_id = p_repository_id)
