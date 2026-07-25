@@ -140,17 +140,14 @@ export default function NeuralMap({ userId }) {
                 ctx.fill();
 
                 // Draw text labels
-                const labelFontSize = 10 / globalScale;
+                const labelFontSize = 3.5;
                 ctx.font = `${labelFontSize}px Outfit, Inter, sans-serif`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 ctx.fillStyle = '#e2e8f0';
 
-                // Display file names and repo names clearly (always show repo names, show file names when zoomed in)
-                const isRepo = node.color === '#818cf8';
-                if (isRepo || globalScale > 1.2) {
-                  ctx.fillText(label, node.x, node.y + size + (labelFontSize * 0.7));
-                }
+                // Display file names and repo names clearly (always show all labels, they will scale down naturally)
+                ctx.fillText(label, node.x, node.y + size + 2.5);
               }}
               nodePointerAreaPaint={(node, color, ctx) => {
                 const size = node.val || 5;
