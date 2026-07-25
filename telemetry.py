@@ -471,8 +471,8 @@ def get_chat_history(user_id: str) -> List[Dict]:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, conversation_id, role, content, timestamp FROM chat_messages "
-                "WHERE user_id = ? ORDER BY id DESC LIMIT 50",
+                "SELECT id, conversation_id, role, content AS query, timestamp FROM chat_messages "
+                "WHERE user_id = ? AND role = 'user' ORDER BY id DESC LIMIT 50",
                 (user_id,)
             )
             return [dict(row) for row in cursor.fetchall()]

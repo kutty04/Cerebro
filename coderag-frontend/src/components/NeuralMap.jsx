@@ -129,6 +129,36 @@ export default function NeuralMap({ userId }) {
               ref={fgRef}
               graphData={graphData}
               nodeLabel="name"
+              nodeCanvasObject={(node, ctx, globalScale) => {
+                const label = node.name || '';
+                const size = node.val || 5;
+                
+                // Draw node circle
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
+                ctx.fillStyle = node.color || '#38bdf8';
+                ctx.fill();
+
+                // Draw text labels
+                const labelFontSize = 10 / globalScale;
+                ctx.font = `${labelFontSize}px Outfit, Inter, sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = '#e2e8f0';
+
+                // Display file names and repo names clearly (always show repo names, show file names when zoomed in)
+                const isRepo = node.color === '#818cf8';
+                if (isRepo || globalScale > 1.2) {
+                  ctx.fillText(label, node.x, node.y + size + (labelFontSize * 0.7));
+                }
+              }}
+              nodePointerAreaPaint={(node, color, ctx) => {
+                const size = node.val || 5;
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
+                ctx.fillStyle = color;
+                ctx.fill();
+              }}
               nodeColor={(node) => node.color || '#38bdf8'}
               nodeVal={(node) => node.val || 5}
               linkColor={() => 'rgba(56, 189, 248, 0.2)'}
