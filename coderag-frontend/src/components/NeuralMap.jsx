@@ -53,6 +53,8 @@ export default function NeuralMap({ userId }) {
     }
   }, [loading, viewMode, graphData]);
 
+  const getNodeCanvasMode = useCallback(() => 'after', []);
+
   const drawNodeLabel = useCallback((node, ctx, globalScale) => {
     if (!node || typeof node.x !== 'number' || typeof node.y !== 'number') return;
 
@@ -166,7 +168,7 @@ export default function NeuralMap({ userId }) {
             ref={fgRef}
             graphData={graphData}
             nodeLabel="name"
-            nodeCanvasObjectMode="after"
+            nodeCanvasObjectMode={getNodeCanvasMode}
             nodeCanvasObject={drawNodeLabel}
             nodeColor={(node) => node.color || '#38bdf8'}
             nodeVal={(node) => node.val || 5}
