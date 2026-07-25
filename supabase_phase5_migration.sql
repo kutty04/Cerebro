@@ -352,4 +352,30 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION promote_repository_index(uuid, uuid, uuid, text, text) TO authenticated, anon, service_role;
+
+-- Overload accepting text parameters for PostgREST RPC compatibility
+CREATE OR REPLACE FUNCTION promote_repository_index(
+  p_user_id text,
+  p_repository_id text,
+  p_ingestion_job_id text,
+  p_new_version text,
+  p_commit_sha text DEFAULT ''
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  RETURN promote_repository_index(
+    p_user_id::uuid,
+    p_repository_id::uuid,
+    p_ingestion_job_id::uuid,
+    p_new_version,
+    p_commit_sha
+  );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION promote_repository_index(text, text, text, text, text) TO authenticated, anon, service_role;
 NOTIFY pgrst, 'reload schema';

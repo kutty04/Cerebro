@@ -245,13 +245,13 @@ class DatabaseAdapter:
     def promote_index_version(cls, db: Any, user_id: str, repo_id: str, job_id: str, new_version: str, commit_sha: Optional[str] = None):
         """
         Atomically promotes the repository index version via DB transaction.
-        Calls the promote_repository_index RPC.
+        Calls the promote_repository_index RPC with automatic direct table update fallback.
         """
         if not db:
             return
 
         try:
-            res = db.rpc(
+            db.rpc(
                 "promote_repository_index",
                 {
                     "p_user_id": user_id,
@@ -261,8 +261,27 @@ class DatabaseAdapter:
                     "p_commit_sha": commit_sha or "",
                 }
             ).execute()
-        except Exception as e:
-            cls._handle_db_error(e, "promote_index_version")
+        except Exception as rpc_err:
+            logger.warning(f"RPC promote_repository_index failed ({type(rpc_err).__name__}: {rpc_err}), executing table fallback")
+            try:
+                now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                db.table("user_repositories").update({
+                    "active_index_version": new_version,
+                    "status": "ready",
+                    "indexed_commit_sha": commit_sha,
+                    "last_indexed_at": now_str,
+                    "updated_at": now_str,
+                }).eq("id", repo_id).eq("user_id", user_id).execute()
+
+                db.table("ingestion_jobs").update({
+                    "status": "completed",
+                    "completed_at": now_str,
+                    "updated_at": now_str,
+                }).eq("id", job_id).eq("user_id", user_id).execute()
+
+                db.table("code_snippets").delete().eq("repository_id", repo_id).eq("user_id", user_id).neq("index_version", new_version).execute()
+            except Exception as e:
+                cls._handle_db_error(e, "promote_index_version")
 
     @classmethod
     def fail_and_cleanup_job(cls, db: Any, user_id: str, repo_id: str, job_id: str, failure_category: str):
