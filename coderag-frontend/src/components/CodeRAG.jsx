@@ -535,10 +535,10 @@ export default function Cerebro({ user }) {
 
   /* ── Nav tabs ───────────────────────────────────────── */
   const NAV_TABS = [
-    { id: 'search',    label: 'Search',       icon: <Search size={16} aria-hidden="true" /> },
-    { id: 'repos',     label: 'Repositories', icon: <FolderDot size={16} aria-hidden="true" /> },
-    { id: 'graph',     label: 'Knowledge map',icon: <Layers size={16} aria-hidden="true" /> },
-    { id: 'dashboard', label: 'Analytics',    icon: <BarChart2 size={16} aria-hidden="true" /> },
+    { id: 'search',    label: 'Neural Search', icon: <Search size={16} aria-hidden="true" /> },
+    { id: 'repos',     label: 'Neural Vault',  icon: <FolderDot size={16} aria-hidden="true" /> },
+    { id: 'graph',     label: 'Neural Map',    icon: <Layers size={16} aria-hidden="true" /> },
+    { id: 'dashboard', label: 'Telemetry',     icon: <BarChart2 size={16} aria-hidden="true" /> },
   ];
 
   const handleTabKeyDown = (e, tabId, idx) => {
@@ -616,35 +616,101 @@ export default function Cerebro({ user }) {
           </nav>
 
           <div className="ws-header-right">
-            <div className="ws-user" aria-label={`Signed in as ${user.email}`}>
-              <div className="ws-avatar" aria-hidden="true">
-                {user.email?.[0]?.toUpperCase() ?? 'U'}
+            <div className="ws-user-capsule">
+              <div className="ws-user" aria-label={`Signed in as ${user.email}`}>
+                <div className="ws-avatar" aria-hidden="true">
+                  {user.email?.[0]?.toUpperCase() ?? 'U'}
+                </div>
+                <span className="ws-email">{user.email}</span>
               </div>
-              <span className="ws-email">{user.email}</span>
+              <button
+                type="button"
+                className="ws-ingest-btn"
+                onClick={() => setShowIngestModal(true)}
+                aria-label="Index a new repository"
+              >
+                <Plus size={14} aria-hidden="true" />
+                <span>Import Repo</span>
+              </button>
+              <button
+                type="button"
+                className="ws-signout-btn"
+                onClick={() => supabase.auth.signOut()}
+                aria-label="Sign out of Cerebro"
+              >
+                <span>Disconnect</span>
+              </button>
             </div>
-            <button
-              type="button"
-              className="ws-ingest-btn"
-              onClick={() => setShowIngestModal(true)}
-              aria-label="Index a new repository"
-            >
-              <Plus size={16} aria-hidden="true" />
-              <span>Index repo</span>
-            </button>
-            <button
-              type="button"
-              className="ws-signout-btn"
-              onClick={() => supabase.auth.signOut()}
-              aria-label="Sign out of Cerebro"
-            >
-              <LogOut size={16} aria-hidden="true" />
-              <span>Sign out</span>
-            </button>
           </div>
         </header>
 
-        {/* ── Main content ─────────────────────────────── */}
         <main id="main-content" className="ws-main">
+          {/* Centered Cerebro Workspace Header */}
+          <div className="cerebro-dashboard-header">
+            {view === 'search' && !results && !loading && (
+              <div className="hero-logo-container" aria-hidden="true">
+                <svg viewBox="0 0 100 100" className="cerebro-logo-svg" width="80" height="80">
+                  <defs>
+                    <radialGradient id="logo-glow" cx="50%" cy="50%" r="50%">
+                      <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.4" />
+                      <stop offset="100%" stopColor="#22d3ee" stopOpacity="0" />
+                    </radialGradient>
+                  </defs>
+                  <circle cx="50" cy="50" r="46" fill="transparent" stroke="#22d3ee" strokeWidth="2" />
+                  <circle cx="50" cy="50" r="40" fill="url(#logo-glow)" />
+                  <path d="M50,18 C33,18 22,30 22,50 C22,70 33,82 50,82 C67,82 78,70 78,50 C78,30 67,18 50,18 Z" fill="none" stroke="#22d3ee" strokeWidth="1.5" strokeDasharray="3 3" opacity="0.3" />
+                  <path d="M50,22 C37,22 28,32 28,50 C28,68 37,78 50,78 Z" fill="none" stroke="#06b6d4" strokeWidth="2.5" />
+                  <path d="M50,22 C63,22 72,32 72,50 C72,68 63,78 50,78 Z" fill="none" stroke="#06b6d4" strokeWidth="2.5" />
+                  <path d="M50,30 L40,38 L34,38" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" />
+                  <path d="M50,42 L38,48 L32,48" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" />
+                  <path d="M50,58 L42,54 L34,54" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" />
+                  <path d="M50,70 L38,62 L32,62" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" />
+                  <path d="M50,30 L60,38 L66,38" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" />
+                  <path d="M50,42 L62,48 L68,48" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" />
+                  <path d="M50,58 L58,54 L66,54" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" />
+                  <path d="M50,70 L62,62 L68,62" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" />
+                  <circle cx="34" cy="38" r="3" fill="#22d3ee" />
+                  <circle cx="32" cy="48" r="3" fill="#22d3ee" />
+                  <circle cx="34" cy="54" r="3" fill="#22d3ee" />
+                  <circle cx="32" cy="62" r="3" fill="#22d3ee" />
+                  <circle cx="66" cy="38" r="3" fill="#22d3ee" />
+                  <circle cx="68" cy="48" r="3" fill="#22d3ee" />
+                  <circle cx="66" cy="54" r="3" fill="#22d3ee" />
+                  <circle cx="68" cy="62" r="3" fill="#22d3ee" />
+                </svg>
+              </div>
+            )}
+
+            <h1 className={`dashboard-title ${view !== 'search' || results || loading ? 'dashboard-title--compact' : ''}`}>
+              CEREBRO
+            </h1>
+            
+            {view === 'search' && !results && !loading && (
+              <p className="dashboard-subtitle">
+                Amplifying your neural link to the codebase.
+              </p>
+            )}
+
+            {/* Redesigned Navigation Tabs matching Pills in reference image */}
+            <div className="dashboard-nav-pills" role="tablist" aria-label="Workspace sections">
+              {NAV_TABS.map((tab, idx) => (
+                <button
+                  key={tab.id}
+                  id={`tab-dashboard-${tab.id}`}
+                  type="button"
+                  role="tab"
+                  className={`dashboard-nav-pill ${view === tab.id ? 'active' : ''}`}
+                  aria-selected={view === tab.id}
+                  onClick={() => setView(tab.id)}
+                  tabIndex={view === tab.id ? 0 : -1}
+                  onKeyDown={(e) => handleTabKeyDown(e, tab.id, idx)}
+                >
+                  {tab.icon}
+                  <span>{tab.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
 
           {/* ────────── SEARCH VIEW ───────────────────── */}
           <div
@@ -654,19 +720,19 @@ export default function Cerebro({ user }) {
             hidden={view !== 'search'}
             className="ws-panel"
           >
-            {/* Search form */}
+            {/* Search form redesigned to match hero-search-panel */}
             <section className="search-section" aria-label="Code search">
-              <form onSubmit={handleSearchSubmit} className="search-form" noValidate>
-                <div className="search-bar-wrapper">
+              <form onSubmit={handleSearchSubmit} className="search-form hero-search-panel" noValidate>
+                <div className="search-input-wrapper">
                   <label htmlFor="search-input" className="sr-only">
-                    Search your codebase
+                    Search prompt
                   </label>
                   <Search size={18} className="search-icon" aria-hidden="true" />
                   <input
                     id="search-input"
                     type="search"
                     className="search-input"
-                    placeholder="Ask a question about your codebase…"
+                    placeholder="Read the mind of your past projects... (e.g., 'How do I handle authentication?')"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     onKeyDown={(e) => {
@@ -678,44 +744,46 @@ export default function Cerebro({ user }) {
                     autoComplete="off"
                     aria-label="Search query"
                   />
-                  <button
-                    type="submit"
-                    className="search-submit"
-                    disabled={loading || !query.trim()}
-                    aria-label={loading ? 'Searching…' : 'Search'}
-                  >
-                    {loading
-                      ? <Activity size={18} className="spin" aria-hidden="true" />
-                      : <ArrowRight size={18} aria-hidden="true" />
-                    }
-                  </button>
                 </div>
 
-                {/* Repo filter */}
-                <div className="repo-filter-bar">
-                  <label htmlFor="repo-filter" className="repo-filter-label">
-                    <FolderDot size={14} aria-hidden="true" />
+                {/* Repo filter redesigned to search-select-wrapper */}
+                <div className="search-select-wrapper">
+                  <label htmlFor="repo-filter" className="sr-only">
                     Repository scope
                   </label>
                   <select
                     id="repo-filter"
-                    className="repo-filter-select"
                     value={repoFilter}
                     onChange={(e) => setRepoFilter(e.target.value)}
-                    aria-describedby="repo-filter-hint"
+                    aria-label="Filter by repository"
                   >
-                    <option value="">All repositories</option>
+                    <option value="">All Projects</option>
                     {userRepos.map((r) => {
                       const name = r.repository_name ?? r;
                       return <option key={name} value={name}>{name}</option>;
                     })}
                   </select>
-                  <span id="repo-filter-hint" className="sr-only">
-                    Leave blank to search across all indexed repositories
-                  </span>
                 </div>
+
+                <button
+                  type="submit"
+                  className="btn-connect"
+                  disabled={loading || !query.trim()}
+                  aria-label={loading ? 'Searching…' : 'Connect'}
+                >
+                  Connect
+                </button>
               </form>
             </section>
+
+            {/* Quote Card (only visible on initial empty state) */}
+            {!results && !loading && (
+              <div className="hero-quote-card">
+                <p className="quote-text">
+                  “Just as Cerebro finds any mutant on Earth, we will find the exact logic you need.”
+                </p>
+              </div>
+            )}
 
             {/* Results region */}
             <section
