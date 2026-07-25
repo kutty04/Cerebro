@@ -273,7 +273,7 @@ def test_rls_migration_sql_static_review():
 
     assert "SET search_path = public, pg_temp;" in sql
     assert "ENABLE ROW LEVEL SECURITY" in sql
-    assert "auth.uid()::text = user_id" in sql
+    assert "auth.uid() = user_id" in sql
     assert "SECURITY INVOKER" in sql
     assert "CREATE TABLE IF NOT EXISTS user_repositories" in sql
     assert "CREATE TABLE IF NOT EXISTS user_conversations" in sql
@@ -455,7 +455,6 @@ def test_sql_migration_static_checks():
 
     # Policies checks
     assert "auth.uid() = user_id" in sql
-    assert "auth.uid()::text = user_id" in sql
 
     # Invoker & Search Path checks
     assert "SECURITY INVOKER" in sql

@@ -42,12 +42,12 @@ ALTER TABLE code_snippets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_repositories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_conversations ENABLE ROW LEVEL SECURITY;
 
--- 5. RLS Policies for code_snippets (Strict auth.uid() text comparison)
+-- 5. RLS Policies for code_snippets (Strict auth.uid() UUID comparison)
 DROP POLICY IF EXISTS "Users access own code snippets" ON code_snippets;
 CREATE POLICY "Users access own code snippets" ON code_snippets
     FOR ALL
-    USING (auth.uid()::text = user_id)
-    WITH CHECK (auth.uid()::text = user_id);
+    USING (auth.uid() = user_id)
+    WITH CHECK (auth.uid() = user_id);
 
 -- 6. RLS Policies for user_repositories
 DROP POLICY IF EXISTS "Users access own repositories" ON user_repositories;
@@ -67,7 +67,7 @@ CREATE POLICY "Users access own conversations" ON user_conversations
 CREATE OR REPLACE FUNCTION search_code_snippets(
   query_embedding vector(384),
   match_count int DEFAULT 5,
-  p_user_id text DEFAULT NULL
+  p_user_id uuid DEFAULT NULL
 )
 RETURNS TABLE (
   id bigint,
@@ -83,10 +83,10 @@ SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  effective_user_id text;
+  effective_user_id uuid;
 BEGIN
   -- Strict isolation: Require auth.uid() context or explicit p_user_id parameter
-  effective_user_id := COALESCE(auth.uid()::text, p_user_id);
+  effective_user_id := COALESCE(auth.uid(), p_user_id);
 
   IF effective_user_id IS NULL THEN
     RAISE EXCEPTION 'Authentication required for vector search';

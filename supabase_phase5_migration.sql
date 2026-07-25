@@ -122,12 +122,12 @@ CREATE POLICY "Users access own ingestion jobs" ON ingestion_jobs
     USING (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
 
--- 3. Policies for code_snippets (Strict auth.uid() text format comparison)
+-- 3. Policies for code_snippets (Strict auth.uid() UUID comparison)
 DROP POLICY IF EXISTS "Users access own code snippets" ON code_snippets;
 CREATE POLICY "Users access own code snippets" ON code_snippets
     FOR ALL
-    USING (auth.uid()::text = user_id)
-    WITH CHECK (auth.uid()::text = user_id);
+    USING (auth.uid() = user_id)
+    WITH CHECK (auth.uid() = user_id);
 
 
 -- ==========================================
@@ -137,7 +137,7 @@ CREATE POLICY "Users access own code snippets" ON code_snippets
 CREATE OR REPLACE FUNCTION search_code_snippets(
   query_embedding vector(384),
   match_count int DEFAULT 5,
-  p_user_id text DEFAULT NULL,
+  p_user_id uuid DEFAULT NULL,
   p_repository_id uuid DEFAULT NULL,
   p_index_version text DEFAULT NULL
 )
@@ -155,14 +155,14 @@ SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  effective_user_id text;
+  effective_user_id uuid;
 END;
 $$; -- Empty placeholder for type signature before full body
 
 CREATE OR REPLACE FUNCTION search_code_snippets(
   query_embedding vector(384),
   match_count int DEFAULT 5,
-  p_user_id text DEFAULT NULL,
+  p_user_id uuid DEFAULT NULL,
   p_repository_id uuid DEFAULT NULL,
   p_index_version text DEFAULT NULL
 )
@@ -180,10 +180,10 @@ SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-  effective_user_id text;
+  effective_user_id uuid;
 BEGIN
   -- Strict context isolation
-  effective_user_id := COALESCE(auth.uid()::text, p_user_id);
+  effective_user_id := COALESCE(auth.uid(), p_user_id);
 
   IF effective_user_id IS NULL THEN
     RAISE EXCEPTION 'Authentication required for vector search';
@@ -209,9 +209,9 @@ END;
 $$;
 
 -- Restrict function execution to authenticated and anon users explicitly
-REVOKE ALL ON FUNCTION search_code_snippets(vector, int, text, uuid, text) FROM public;
-GRANT EXECUTE ON FUNCTION search_code_snippets(vector, int, text, uuid, text) TO authenticated;
-GRANT EXECUTE ON FUNCTION search_code_snippets(vector, int, text, uuid, text) TO anon;
+REVOKE ALL ON FUNCTION search_code_snippets(vector, int, uuid, uuid, text) FROM public;
+GRANT EXECUTE ON FUNCTION search_code_snippets(vector, int, uuid, uuid, text) TO authenticated;
+GRANT EXECUTE ON FUNCTION search_code_snippets(vector, int, uuid, uuid, text) TO anon;
 
 
 -- ==========================================
