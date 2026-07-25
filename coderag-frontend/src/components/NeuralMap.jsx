@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Maximize2, Table2, Share2, AlertTriangle } from 'lucide-react';
 import { fetchGraphData } from '../services';
 
@@ -52,6 +52,27 @@ export default function NeuralMap({ userId }) {
       };
     }
   }, [loading, viewMode, graphData]);
+
+  const drawNodeLabel = useCallback((node, ctx, globalScale) => {
+    const label = node.name || '';
+    const size = node.val || 5;
+    const scale = globalScale || 1.0;
+    
+    // Draw text labels with scale-invariant rendering
+    const labelFontSize = 10 / (scale > 0 ? scale : 1.0);
+    ctx.font = `${labelFontSize}px Outfit, Inter, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // 1. Draw a dark outline behind the text for high contrast
+    ctx.strokeStyle = '#07090f';
+    ctx.lineWidth = 3 / (scale > 0 ? scale : 1.0);
+    ctx.strokeText(label, node.x, node.y + size + (labelFontSize * 0.7));
+
+    // 2. Draw the actual light text
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fillText(label, node.x, node.y + size + (labelFontSize * 0.7));
+  }, []);
 
   const isEmpty = !loading && !error && graphData.nodes.length === 0;
 
@@ -143,27 +164,8 @@ export default function NeuralMap({ userId }) {
             ref={fgRef}
             graphData={graphData}
             nodeLabel="name"
-            nodeCanvasObjectMode={() => 'after'}
-            nodeCanvasObject={(node, ctx, globalScale) => {
-              const label = node.name || '';
-              const size = node.val || 5;
-              const scale = globalScale || 1.0;
-              
-              // Draw text labels with scale-invariant rendering
-              const labelFontSize = 10 / (scale > 0 ? scale : 1.0);
-              ctx.font = `${labelFontSize}px Outfit, Inter, sans-serif`;
-              ctx.textAlign = 'center';
-              ctx.textBaseline = 'middle';
-
-              // 1. Draw a dark outline behind the text for high contrast
-              ctx.strokeStyle = '#07090f';
-              ctx.lineWidth = 3 / (scale > 0 ? scale : 1.0);
-              ctx.strokeText(label, node.x, node.y + size + (labelFontSize * 0.7));
-
-              // 2. Draw the actual light text
-              ctx.fillStyle = '#e2e8f0';
-              ctx.fillText(label, node.x, node.y + size + (labelFontSize * 0.7));
-            }}
+            nodeCanvasObjectMode="after"
+            nodeCanvasObject={drawNodeLabel}
             nodeColor={(node) => node.color || '#38bdf8'}
             nodeVal={(node) => node.val || 5}
             linkColor={() => 'rgba(56, 189, 248, 0.2)'}
