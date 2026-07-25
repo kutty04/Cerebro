@@ -34,6 +34,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Safe cleanup of legacy views if replacing view column schema
+DROP VIEW IF EXISTS recent_snippets CASCADE;
+DROP VIEW IF EXISTS snippet_stats CASCADE;
+
 -- Optional: Create a view for recent snippets
 CREATE OR REPLACE VIEW recent_snippets AS
 SELECT

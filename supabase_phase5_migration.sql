@@ -192,7 +192,7 @@ BEGIN
   RETURN QUERY
   SELECT
     code_snippets.id,
-    user_repositories.repo_name,
+    user_repositories.repository_name AS repo_name,
     code_snippets.file_path,
     code_snippets.language,
     code_snippets.code_content,
@@ -201,7 +201,7 @@ BEGIN
   FROM code_snippets
   INNER JOIN user_repositories ON code_snippets.repository_id = user_repositories.id
   WHERE code_snippets.embedding IS NOT NULL
-    AND code_snippets.user_id = effective_user_id
+    AND (code_snippets.user_id = effective_user_id::text OR code_snippets.user_id = effective_user_id::varchar)
     AND (p_repository_id IS NULL OR code_snippets.repository_id = p_repository_id)
     AND (p_index_version IS NULL OR code_snippets.index_version = p_index_version)
   ORDER BY code_snippets.embedding <=> query_embedding
