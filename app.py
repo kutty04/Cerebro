@@ -123,6 +123,9 @@ def validate_startup_config() -> bool:
 async def lifespan(app_instance: FastAPI):
     global db
     logger.info("🚀 Starting CodeRAG API initialization...")
+    import os
+    env_keys = [k for k in os.environ.keys() if any(x in k for x in ['SUPABASE', 'CEREBRO', 'PRODUCTION', 'HF_'])]
+    logger.info("Environment Keys Received: %s", env_keys)
     
     config_valid = validate_startup_config()
     is_prod = (
