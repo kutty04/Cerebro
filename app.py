@@ -1274,7 +1274,7 @@ async def get_graph_data(
     target_user_id = current_user.id
 
     try:
-        result = db.table("code_snippets").select("repo_name, file_path").eq("user_id", target_user_id).execute()
+        result = db.table("code_snippets").select("*").eq("user_id", target_user_id).execute()
 
         nodes = []
         links = []
@@ -1284,8 +1284,8 @@ async def get_graph_data(
         nodes.append({"id": "ME", "name": "Neural Core", "val": 15, "color": "#38bdf8", "type": "core", "group": "Neural Core"})
 
         for item in (result.data or []):
-            repo = item.get("repo_name")
-            file = item.get("file_path")
+            repo = item.get("repo_name") or item.get("repository_name")
+            file = item.get("file_path") or item.get("path")
             if not repo or not file:
                 continue
 
@@ -1307,6 +1307,16 @@ async def get_graph_data(
                 })
                 links.append({"source": repo, "target": file_id})
                 seen_files.add(file_id)
+
+        # Fallback: if no file snippets found in code_snippets yet, display owned repositories from user_repositories
+        if len(seen_repos) == 0:
+            user_repos = DatabaseAdapter.list_owned_repos(db, target_user_id)
+            for r in (user_repos or []):
+                repo = r.get("repository_name")
+                if repo and repo not in seen_repos:
+                    nodes.append({"id": repo, "name": repo, "val": 10, "color": "#818cf8", "type": "repo", "group": repo})
+                    links.append({"source": "ME", "target": repo})
+                    seen_repos.add(repo)
 
         return {"nodes": nodes, "links": links}
     except Exception as e:
