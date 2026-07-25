@@ -28,19 +28,29 @@ export default function NeuralMap({ userId }) {
 
   useEffect(() => {
     if (!loading && fgRef.current && viewMode === 'graph') {
-      const t = setTimeout(() => {
-        fgRef.current?.zoomToFit(400);
-        
-        // Push nodes much further apart (increase charge repulsion strength)
-        fgRef.current.d3Force('charge')?.strength(-350);
-        
-        // Set link distance significantly wider
-        fgRef.current.d3Force('link')?.distance(100);
-        
-        // Explicitly reheat simulation to compute new spaced positions
-        fgRef.current.d3ReheatSimulation();
-      }, 500);
-      return () => clearTimeout(t);
+      // Periodic check to capture async D3 force initialization and apply spacing
+      let count = 0;
+      const interval = setInterval(() => {
+        const fg = fgRef.current;
+        if (fg) {
+          const charge = fg.d3Force('charge');
+          const link = fg.d3Force('link');
+          if (charge && link) {
+            charge.strength(-400);
+            link.distance(120);
+            fg.d3ReheatSimulation();
+            count++;
+            if (count >= 6) {
+              clearInterval(interval);
+              fg.zoomToFit(400);
+            }
+          }
+        }
+      }, 300);
+
+      return () => {
+        clearInterval(interval);
+      };
     }
   }, [loading, viewMode, graphData]);
 
@@ -140,18 +150,13 @@ export default function NeuralMap({ userId }) {
               ref={fgRef}
               graphData={graphData}
               nodeLabel="name"
+              nodeCanvasObjectMode={() => 'after'}
               nodeCanvasObject={(node, ctx, globalScale) => {
                 const label = node.name || '';
                 const size = node.val || 5;
-                
-                // Draw node circle
-                ctx.beginPath();
-                ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
-                ctx.fillStyle = node.color || '#38bdf8';
-                ctx.fill();
-
-                // Draw text labels with scale-invariant rendering (fallback for undefined scale)
                 const scale = globalScale || 1.0;
+                
+                // Draw text labels with scale-invariant rendering
                 const labelFontSize = 10 / (scale > 0 ? scale : 1.0);
                 ctx.font = `${labelFontSize}px Outfit, Inter, sans-serif`;
                 ctx.textAlign = 'center';
@@ -165,13 +170,6 @@ export default function NeuralMap({ userId }) {
                 // 2. Draw the actual light text
                 ctx.fillStyle = '#e2e8f0';
                 ctx.fillText(label, node.x, node.y + size + (labelFontSize * 0.7));
-              }}
-              nodePointerAreaPaint={(node, color, ctx) => {
-                const size = node.val || 5;
-                ctx.beginPath();
-                ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
-                ctx.fillStyle = color;
-                ctx.fill();
               }}
               nodeColor={(node) => node.color || '#38bdf8'}
               nodeVal={(node) => node.val || 5}
