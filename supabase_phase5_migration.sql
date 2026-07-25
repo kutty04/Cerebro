@@ -31,6 +31,51 @@ CREATE TABLE IF NOT EXISTS user_repositories (
     CONSTRAINT user_repo_unique UNIQUE(user_id, canonical_url)
 );
 
+-- Ensure all Phase 5 columns exist on pre-existing user_repositories tables
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='user_repositories' AND column_name='repository_owner') THEN
+        ALTER TABLE user_repositories ADD COLUMN repository_owner text DEFAULT '';
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='user_repositories' AND column_name='repository_name') THEN
+        ALTER TABLE user_repositories ADD COLUMN repository_name text DEFAULT '';
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='user_repositories' AND column_name='repo_name') THEN
+        UPDATE user_repositories SET repository_name = repo_name WHERE repository_name = '' OR repository_name IS NULL;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='user_repositories' AND column_name='provider') THEN
+        ALTER TABLE user_repositories ADD COLUMN provider text DEFAULT 'github';
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='user_repositories' AND column_name='active_index_version') THEN
+        ALTER TABLE user_repositories ADD COLUMN active_index_version text DEFAULT 'v1';
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='user_repositories' AND column_name='status') THEN
+        ALTER TABLE user_repositories ADD COLUMN status text DEFAULT 'pending';
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='user_repositories' AND column_name='indexed_file_count') THEN
+        ALTER TABLE user_repositories ADD COLUMN indexed_file_count integer DEFAULT 0;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='user_repositories' AND column_name='indexed_chunk_count') THEN
+        ALTER TABLE user_repositories ADD COLUMN indexed_chunk_count integer DEFAULT 0;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='user_repositories' AND column_name='last_error_category') THEN
+        ALTER TABLE user_repositories ADD COLUMN last_error_category text;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='user_repositories' AND column_name='last_indexed_at') THEN
+        ALTER TABLE user_repositories ADD COLUMN last_indexed_at timestamptz;
+    END IF;
+END;
+$$;
+
 -- 2. Create Ingestion Jobs Table with Status Constraints
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
