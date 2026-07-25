@@ -1,131 +1,176 @@
-import React, { useState, useEffect, useRef } from 'react';
-import ForceGraph2D from 'react-force-graph-2d';
-import { Activity, Maximize2, Minimize2 } from 'lucide-react';
+import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
+import { Maximize2, Table2, Share2, AlertTriangle } from 'lucide-react';
+import { fetchGraphData } from '../services';
 
-export default function NeuralMap({ user }) {
+/* react-force-graph-2d is chunked separately */
+const ForceGraph2D = lazy(() => import('react-force-graph-2d'));
+
+export default function NeuralMap({ userId }) {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState(null);
+  const [viewMode, setViewMode]   = useState('graph'); // 'graph' | 'table'
   const fgRef = useRef();
 
-  const fetchGraphData = async () => {
+  useEffect(() => {
     setLoading(true);
-    try {
-      const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
-      const res = await fetch(`${apiUrl}/graph-data?user_id=${user.id}`);
-      if (!res.ok) throw new Error('Graph data endpoint not found. Restart your backend!');
-      const data = await res.json();
-      setGraphData(data);
-    } catch (err) {
-      console.error('Failed to fetch graph data:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+    setError(null);
+    fetchGraphData()
+      .then((data) => {
+        setGraphData(data);
+        setLoading(false);
+      })
+      .catch((err) => {
+        setError(err.message);
+        setLoading(false);
+      });
+  }, [userId]);
 
   useEffect(() => {
-    fetchGraphData();
-  }, [user.id]);
-
-  useEffect(() => {
-    // Zoom to fit after data loads
-    if (!loading && fgRef.current) {
-        setTimeout(() => {
-            fgRef.current.zoomToFit(400);
-        }, 500);
+    if (!loading && fgRef.current && viewMode === 'graph') {
+      const t = setTimeout(() => fgRef.current?.zoomToFit(400), 500);
+      return () => clearTimeout(t);
     }
-  }, [loading]);
+  }, [loading, viewMode]);
 
-  if (loading) {
-    return (
-      <div className="loading-state" style={{ height: '500px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Activity className="spin" /> Mapping Neural Network...
-      </div>
-    );
-  }
+  const isEmpty = !loading && !error && graphData.nodes.length === 0;
 
   return (
-    <div className="neural-map-container" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <div className="view-header">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <h2>Neural Map</h2>
-            <p>A semantic visualization of your indexed knowledge graph.</p>
+    <section className="neural-map-section" aria-labelledby="neural-map-heading">
+      {/* Header */}
+      <div className="neural-map-header">
+        <div>
+          <h1 id="neural-map-heading" className="panel-title">Knowledge Map</h1>
+          <p className="panel-subtitle">
+            Repository-to-file index relationships for your indexed code.
+            This graph shows which files belong to which indexed repository.
+          </p>
+        </div>
+        <div className="neural-map-actions">
+          {/* View toggle */}
+          <div className="nm-view-toggle" role="group" aria-label="Map view mode">
+            <button
+              type="button"
+              className={`nm-toggle-btn ${viewMode === 'graph' ? 'nm-toggle-btn--active' : ''}`}
+              aria-pressed={viewMode === 'graph'}
+              onClick={() => setViewMode('graph')}
+              aria-label="Show graph view"
+            >
+              <Share2 size={14} aria-hidden="true" />
+              Graph
+            </button>
+            <button
+              type="button"
+              className={`nm-toggle-btn ${viewMode === 'table' ? 'nm-toggle-btn--active' : ''}`}
+              aria-pressed={viewMode === 'table'}
+              onClick={() => setViewMode('table')}
+              aria-label="Show table view (accessible fallback)"
+            >
+              <Table2 size={14} aria-hidden="true" />
+              Table
+            </button>
           </div>
-          <button 
-            onClick={() => fgRef.current.zoomToFit(400)}
-            className="ingest-nav-btn"
-            style={{ height: 'fit-content' }}
-          >
-            <Maximize2 size={14} /> Center View
-          </button>
+
+          {viewMode === 'graph' && fgRef.current && (
+            <button
+              type="button"
+              className="btn-ghost nm-center-btn"
+              onClick={() => fgRef.current?.zoomToFit(400)}
+              aria-label="Center and fit the graph to the viewport"
+            >
+              <Maximize2 size={14} aria-hidden="true" />
+              Center view
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="graph-wrapper" style={{ 
-        flex: 1, 
-        minHeight: '600px', 
-        background: '#0a0f1d', // Solid background to block grid interference
-        borderRadius: '24px', 
-        border: '1px solid rgba(56, 189, 248, 0.1)', 
-        position: 'relative',
-        overflow: 'hidden',
-        isolation: 'isolate' // Prevents CSS blend modes/filters from leaking in
-      }}>
-        <ForceGraph2D
-          ref={fgRef}
-          graphData={graphData}
-          nodeLabel="name"
-          nodeColor={node => node.color}
-          nodeVal={node => node.val}
-          linkColor={() => 'rgba(56, 189, 248, 0.15)'}
-          linkWidth={1}
-          backgroundColor="rgba(0,0,0,0)"
-          d3AlphaDecay={0.01}
-          d3VelocityDecay={0.1}
-          cooldownTicks={200}
-          onEngineStop={() => {
-            if (fgRef.current) fgRef.current.zoomToFit(400, 50);
-          }}
-          onNodeClick={node => {
-            fgRef.current.centerAt(node.x, node.y, 1000);
-            fgRef.current.zoom(2, 1000);
-          }}
-          nodeCanvasObject={(node, ctx, globalScale) => {
-            const label = node.name;
-            const fontSize = 12/globalScale;
-            ctx.font = `${fontSize}px Inter`;
-            const textWidth = ctx.measureText(label).width;
-
-            ctx.fillStyle = node.color;
-            ctx.beginPath(); 
-            ctx.arc(node.x, node.y, node.val, 0, 2 * Math.PI, false);
-            ctx.fill();
-
-            // Glow effect for nodes
-            ctx.shadowBlur = 15;
-            ctx.shadowColor = node.color;
-
-            // Only show labels when zoomed in or for important nodes
-            if (globalScale > 1.2 || node.id === 'ME' || node.val > 8) {
-                ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-                ctx.fillText(label, node.x - textWidth / 2, node.y + node.val + fontSize + 2);
-            }
-          }}
-        />
-      </div>
-      
-      <div className="graph-legend" style={{ display: 'flex', gap: '1.5rem', marginTop: '1rem', color: '#94a3b8', fontSize: '0.8rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#38bdf8' }}></div> Neural Core
+      {/* Loading */}
+      {loading && (
+        <div className="loading-panel" role="status" aria-live="polite">
+          <div className="loading-spinner" aria-hidden="true" />
+          <span>Loading knowledge map…</span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#818cf8' }}></div> Repository
+      )}
+
+      {/* Error */}
+      {!loading && error && (
+        <div className="error-card" role="alert">
+          <AlertTriangle size={18} aria-hidden="true" />
+          <div>
+            <p className="error-card-msg">{error}</p>
+            <p className="error-card-hint">The knowledge map could not be loaded.</p>
+          </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#94a3b8' }}></div> Code Node
+      )}
+
+      {/* Empty */}
+      {isEmpty && (
+        <div className="empty-state">
+          <Share2 size={36} className="empty-icon" aria-hidden="true" />
+          <h2 className="empty-title">No graph data available</h2>
+          <p className="empty-desc">
+            Index a repository first. Once indexed, the file-to-repository
+            relationships will appear here.
+          </p>
         </div>
-      </div>
-    </div>
+      )}
+
+      {/* Graph view */}
+      {!loading && !error && !isEmpty && viewMode === 'graph' && (
+        <div className="nm-graph-container" aria-label="Repository-to-file knowledge graph. Use Table view for an accessible alternative.">
+          <Suspense fallback={
+            <div className="loading-panel" role="status">
+              <div className="loading-spinner" aria-hidden="true" />
+              <span>Loading graph renderer…</span>
+            </div>
+          }>
+            <ForceGraph2D
+              ref={fgRef}
+              graphData={graphData}
+              nodeLabel="name"
+              nodeColor={(node) => node.color || '#38bdf8'}
+              nodeVal={(node) => node.val || 5}
+              linkColor={() => 'rgba(56, 189, 248, 0.2)'}
+              linkWidth={1.5}
+              backgroundColor="transparent"
+              enableNodeDrag={true}
+              enableZoom={true}
+            />
+          </Suspense>
+        </div>
+      )}
+
+      {/* Table view (accessible fallback) */}
+      {!loading && !error && !isEmpty && viewMode === 'table' && (
+        <div className="nm-table-wrapper">
+          <table className="nm-table" aria-label="Repository-to-file index relationships">
+            <caption className="nm-table-caption">
+              Indexed files by repository. Each row represents an indexed file node.
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">File / Node</th>
+                <th scope="col">Repository (group)</th>
+                <th scope="col">Type</th>
+              </tr>
+            </thead>
+            <tbody>
+              {graphData.nodes.map((node, idx) => (
+                <tr key={node.id ?? idx}>
+                  <td className="nm-cell-name">{node.name ?? node.id ?? `Node ${idx + 1}`}</td>
+                  <td className="nm-cell-group">{node.group ?? '—'}</td>
+                  <td className="nm-cell-type">{node.type ?? 'file'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="nm-table-summary">
+            {graphData.nodes.length} nodes,{' '}
+            {graphData.links.length} relationships
+          </p>
+        </div>
+      )}
+    </section>
   );
 }

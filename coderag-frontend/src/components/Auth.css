@@ -1,337 +1,203 @@
-.auth-container {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #020617;
-  position: relative;
-  overflow: hidden;
-  font-family: 'Inter', sans-serif;
-  color: white;
-}
+/* ============================================================
+   AUTH COMPONENT STYLES
+   Uses design tokens from index.css :root
+   ============================================================ */
 
 .auth-card {
+  background: var(--cb-bg-card);
+  border: 1px solid var(--cb-border);
+  border-radius: var(--cb-radius-xl);
+  padding: var(--cb-sp-7) var(--cb-sp-6);
   width: 100%;
-  max-width: 400px;
-  background: rgba(15, 23, 42, 0.8);
-  backdrop-filter: blur(20px);
-  border: 1px solid rgba(56, 189, 248, 0.2);
-  border-radius: 24px;
-  padding: 3rem 2rem;
-  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-  z-index: 10;
-  animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+  max-width: 420px;
+  box-shadow: var(--cb-shadow-lg);
 }
 
-@keyframes slideUp {
-  from { opacity: 0; transform: translateY(20px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
+/* ---- Header ---- */
 .auth-header {
   text-align: center;
-  margin-bottom: 2.5rem;
+  margin-bottom: var(--cb-sp-5);
 }
 
-.auth-header h1 {
-  font-size: 2rem;
-  font-weight: 800;
-  letter-spacing: 4px;
-  margin: 1rem 0 0.5rem;
-  background: linear-gradient(to right, #38bdf8, #818cf8);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+.auth-brain-icon {
+  color: var(--cb-accent);
+  margin-bottom: var(--cb-sp-3);
 }
 
-.auth-header p {
-  color: #94a3b8;
-  font-size: 0.9rem;
+.auth-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--cb-text);
+  margin-bottom: var(--cb-sp-2);
 }
 
-.auth-form {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
+.auth-subtitle {
+  font-size: 0.85rem;
+  color: var(--cb-text-2);
+  line-height: 1.5;
 }
 
-.input-group {
-  position: relative;
-}
-
-.input-icon {
-  position: absolute;
-  left: 1rem;
-  top: 50%;
-  transform: translateY(-50%);
-  color: #64748b;
-}
-
-.input-group input {
-  width: 100%;
-  background: rgba(30, 41, 59, 0.5);
-  border: 1px solid rgba(56, 189, 248, 0.1);
-  border-radius: 12px;
-  padding: 0.8rem 1rem 0.8rem 3rem;
-  color: white;
-  font-size: 0.95rem;
-  transition: all 0.3s ease;
-}
-
-.input-group input:focus {
-  outline: none;
-  border-color: #38bdf8;
-  background: rgba(30, 41, 59, 0.8);
-  box-shadow: 0 0 20px rgba(56, 189, 248, 0.1);
-}
-
-.auth-button {
-  margin-top: 1rem;
-  background: linear-gradient(135deg, #0ea5e9, #6366f1);
-  color: white;
-  border: none;
-  border-radius: 12px;
-  padding: 0.9rem;
-  font-weight: 600;
+/* ---- GitHub button ---- */
+.auth-github-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.5rem;
+  gap: var(--cb-sp-2);
+  width: 100%;
+  padding: 0.7rem var(--cb-sp-4);
+  background: var(--cb-bg-2);
+  border: 1px solid var(--cb-border);
+  border-radius: var(--cb-radius-md);
+  color: var(--cb-text);
+  font-size: 0.9rem;
+  font-weight: 500;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: background var(--cb-dur) var(--cb-ease),
+              border-color var(--cb-dur) var(--cb-ease);
+  min-height: 44px;
 }
-
-.auth-button:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 10px 25px -5px rgba(56, 189, 248, 0.4);
+.auth-github-btn:hover:not(:disabled) {
+  background: var(--cb-bg-hover);
+  border-color: var(--cb-border-a);
 }
-
-.auth-button:disabled {
-  opacity: 0.6;
+.auth-github-btn:disabled {
+  opacity: 0.5;
   cursor: not-allowed;
 }
+.auth-github-btn:focus-visible { box-shadow: var(--cb-focus); outline: none; }
 
+/* ---- Divider ---- */
 .auth-divider {
   display: flex;
   align-items: center;
-  margin: 1.5rem 0;
-  color: #475569;
+  gap: var(--cb-sp-3);
+  margin: var(--cb-sp-4) 0;
+  color: var(--cb-text-3);
   font-size: 0.8rem;
 }
-
-.auth-divider::before, .auth-divider::after {
+.auth-divider::before,
+.auth-divider::after {
   content: '';
   flex: 1;
   height: 1px;
-  background: rgba(71, 85, 105, 0.3);
+  background: var(--cb-border);
 }
 
-.auth-divider span {
-  margin: 0 1rem;
+/* ---- Form ---- */
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cb-sp-3);
 }
 
-.github-button {
-  background: #1e293b;
-  color: white;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  padding: 0.8rem;
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cb-sp-1);
+}
+
+.auth-label {
+  display: flex;
+  align-items: center;
+  gap: var(--cb-sp-1);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--cb-text-2);
+}
+
+.auth-input {
+  width: 100%;
+  padding: 0.65rem var(--cb-sp-3);
+  background: var(--cb-bg-input);
+  border: 1px solid var(--cb-border);
+  border-radius: var(--cb-radius);
+  color: var(--cb-text);
+  font-size: 0.9rem;
+  font-family: inherit;
+  transition: border-color var(--cb-dur) var(--cb-ease),
+              box-shadow var(--cb-dur) var(--cb-ease);
+  min-height: 44px;
+}
+.auth-input::placeholder         { color: var(--cb-text-3); }
+.auth-input:focus                { outline: none; border-color: var(--cb-accent); box-shadow: var(--cb-focus); }
+.auth-input:focus-visible        { outline: none; border-color: var(--cb-accent); box-shadow: var(--cb-focus); }
+.auth-input:disabled             { opacity: 0.5; cursor: not-allowed; }
+
+/* ---- Submit button ---- */
+.auth-submit-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.6rem;
+  gap: var(--cb-sp-2);
+  padding: 0.7rem var(--cb-sp-4);
+  background: var(--cb-accent);
+  color: var(--cb-bg-1);
+  border: none;
+  border-radius: var(--cb-radius-md);
+  font-size: 0.9rem;
+  font-weight: 600;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: background var(--cb-dur) var(--cb-ease),
+              transform var(--cb-dur) var(--cb-ease);
+  min-height: 44px;
+  margin-top: var(--cb-sp-1);
+}
+.auth-submit-btn:hover:not(:disabled) {
+  background: #67d2fb;
+  transform: translateY(-1px);
+}
+.auth-submit-btn:disabled         { opacity: 0.5; cursor: not-allowed; transform: none; }
+.auth-submit-btn:focus-visible    { outline: none; box-shadow: var(--cb-focus); }
+
+/* ---- Message ---- */
+.auth-message {
+  margin-top: var(--cb-sp-3);
+  padding: var(--cb-sp-2) var(--cb-sp-3);
+  border-radius: var(--cb-radius);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+.auth-message--success {
+  background: var(--cb-success-bg);
+  color: var(--cb-success);
+  border: 1px solid rgba(74, 222, 128, 0.25);
+}
+.auth-message--error {
+  background: var(--cb-error-bg);
+  color: var(--cb-error);
+  border: 1px solid var(--cb-border-e);
 }
 
-.github-button:hover {
-  background: #334155;
-}
-
-.auth-footer {
-  margin-top: 2rem;
+/* ---- Toggle ---- */
+.auth-toggle {
+  margin-top: var(--cb-sp-4);
   text-align: center;
 }
-
-.auth-footer button {
+.auth-toggle-btn {
   background: none;
   border: none;
-  color: #38bdf8;
-  font-size: 0.85rem;
+  color: var(--cb-text-2);
+  font-size: 0.83rem;
   cursor: pointer;
-  opacity: 0.8;
-  transition: opacity 0.3s;
-}
-
-.auth-footer button:hover {
-  opacity: 1;
   text-decoration: underline;
+  text-underline-offset: 3px;
+  padding: var(--cb-sp-1) 0;
 }
-
-.auth-message {
-  margin-top: 1.5rem;
-  padding: 0.8rem;
-  border-radius: 8px;
-  font-size: 0.85rem;
-  text-align: center;
-}
-
-.auth-message.success {
-  background: rgba(34, 197, 94, 0.1);
-  color: #4ade80;
-  border: 1px solid rgba(34, 197, 94, 0.2);
-}
-
-.auth-message.error {
-  background: rgba(239, 68, 68, 0.1);
-  color: #f87171;
-  border: 1px solid rgba(239, 68, 68, 0.2);
-}
+.auth-toggle-btn:hover { color: var(--cb-accent); }
+.auth-toggle-btn:focus-visible { outline: none; box-shadow: var(--cb-focus); border-radius: 3px; }
 
 /* ============================================================
-   AUTH MOBILE RESPONSIVENESS — PRODUCTION GRADE
-   Breakpoints: 320, 360, 375, 390, 414, 480, 768
-   Appended below ALL desktop styles — desktop untouched above
+   RESPONSIVE
    ============================================================ */
-
-/* --- Global overflow-wrap for Auth text containers --- */
-.auth-card p,
-.auth-card span,
-.auth-card label,
-.auth-card h1,
-.auth-header p {
-  overflow-wrap: break-word;
-  word-break: break-word;
-}
-
-/* --- 768px and below --- */
-@media (max-width: 768px) {
-  .auth-container {
-    padding: 1.5rem 1rem;
-    align-items: flex-start;
-    padding-top: 4rem;
-  }
-
-  .auth-card {
-    max-width: 100%;
-    padding: 2.25rem 1.5rem;
-    border-radius: 20px;
-  }
-
-  .auth-header h1 {
-    font-size: clamp(1.5rem, 6vw, 2rem);
-    letter-spacing: 3px;
-  }
-
-  .input-group input {
-    padding: 0.9rem 1rem 0.9rem 3rem;
-    font-size: 1rem;
-    min-height: 48px;
-  }
-
-  .auth-button {
-    min-height: 48px;
-    padding: 1rem;
-    font-size: 1rem;
-  }
-
-  .github-button {
-    min-height: 48px;
-    padding: 0.9rem;
-    font-size: 0.95rem;
-  }
-}
-
-/* --- 480px and below --- */
 @media (max-width: 480px) {
-  .auth-container {
-    padding-top: 3rem;
-  }
-
   .auth-card {
-    padding: 2rem 1.25rem;
-    border-radius: 18px;
-  }
-
-  .auth-header h1 {
-    font-size: clamp(1.4rem, 7vw, 1.8rem);
-    letter-spacing: 2px;
-  }
-
-  .auth-header p {
-    font-size: clamp(0.8rem, 3vw, 0.9rem);
+    padding: var(--cb-sp-5) var(--cb-sp-4);
+    border-radius: var(--cb-radius-lg);
   }
 }
 
-/* --- 414px and below --- */
-@media (max-width: 414px) {
-  .auth-card {
-    padding: 1.75rem 1.1rem;
-  }
-
-  .input-group input {
-    font-size: 0.95rem;
-  }
-
-  .auth-footer button {
-    font-size: 0.8rem;
-  }
-}
-
-/* --- 390px and below (iPhone 14 Pro) --- */
-@media (max-width: 390px) {
-  .auth-card {
-    padding: 1.5rem 1rem;
-    border-radius: 16px;
-  }
-
-  .auth-header h1 {
-    font-size: clamp(1.25rem, 7.5vw, 1.6rem);
-  }
-}
-
-/* --- 375px and below (iPhone SE / 13 mini) --- */
 @media (max-width: 375px) {
-  .auth-card {
-    padding: 1.5rem 0.9rem;
-  }
-}
-
-/* --- 360px and below (small Android) --- */
-@media (max-width: 360px) {
-  .auth-card {
-    padding: 1.25rem 0.85rem;
-  }
-
-  .auth-header h1 {
-    font-size: 1.25rem;
-    letter-spacing: 2px;
-  }
-}
-
-/* --- 320px and below (smallest phones) --- */
-@media (max-width: 320px) {
-  .auth-card {
-    padding: 1rem 0.75rem;
-    border-radius: 14px;
-  }
-
-  .auth-header {
-    margin-bottom: 1.75rem;
-  }
-
-  .auth-header h1 {
-    font-size: 1.1rem;
-    letter-spacing: 1px;
-  }
-
-  .input-group input {
-    padding: 0.8rem 0.85rem 0.8rem 2.75rem;
-    font-size: 0.88rem;
-  }
-
-  .auth-button,
-  .github-button {
-    font-size: 0.9rem;
-    min-height: 44px;
-  }
+  .auth-card { padding: var(--cb-sp-5) var(--cb-sp-3); }
+  .auth-input, .auth-github-btn, .auth-submit-btn { min-height: 48px; }
 }
