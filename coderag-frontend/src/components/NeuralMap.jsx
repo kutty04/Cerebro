@@ -150,15 +150,16 @@ export default function NeuralMap({ userId }) {
                 ctx.fillStyle = node.color || '#38bdf8';
                 ctx.fill();
 
-                // Draw text labels with scale-invariant rendering
-                const labelFontSize = 10 / globalScale;
+                // Draw text labels with scale-invariant rendering (fallback for undefined scale)
+                const scale = globalScale || 1.0;
+                const labelFontSize = 10 / (scale > 0 ? scale : 1.0);
                 ctx.font = `${labelFontSize}px Outfit, Inter, sans-serif`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
 
                 // 1. Draw a dark outline behind the text for high contrast
                 ctx.strokeStyle = '#07090f';
-                ctx.lineWidth = 3 / globalScale;
+                ctx.lineWidth = 3 / (scale > 0 ? scale : 1.0);
                 ctx.strokeText(label, node.x, node.y + size + (labelFontSize * 0.7));
 
                 // 2. Draw the actual light text
