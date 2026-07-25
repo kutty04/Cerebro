@@ -150,16 +150,20 @@ export default function NeuralMap({ userId }) {
                 ctx.fillStyle = node.color || '#38bdf8';
                 ctx.fill();
 
-                // Draw text labels with capped dynamic scaling
-                const baseFontSize = 4;
-                const labelFontSize = Math.max(3.0, Math.min(12.0, baseFontSize / globalScale));
+                // Draw text labels with scale-invariant rendering
+                const labelFontSize = 10 / globalScale;
                 ctx.font = `${labelFontSize}px Outfit, Inter, sans-serif`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
-                ctx.fillStyle = '#e2e8f0';
 
-                // Display file names and repo names clearly
-                ctx.fillText(label, node.x, node.y + size + labelFontSize + 1.0);
+                // 1. Draw a dark outline behind the text for high contrast
+                ctx.strokeStyle = '#07090f';
+                ctx.lineWidth = 3 / globalScale;
+                ctx.strokeText(label, node.x, node.y + size + (labelFontSize * 0.7));
+
+                // 2. Draw the actual light text
+                ctx.fillStyle = '#e2e8f0';
+                ctx.fillText(label, node.x, node.y + size + (labelFontSize * 0.7));
               }}
               nodePointerAreaPaint={(node, color, ctx) => {
                 const size = node.val || 5;
