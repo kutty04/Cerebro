@@ -1,9 +1,6 @@
-import React, { useState, useEffect, useRef, lazy, Suspense, useMemo } from 'react';
-import { Maximize2, Table2, Share2, AlertTriangle, Filter, Search, X, Copy, Check } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Table2, Share2, AlertTriangle, Filter, Search, X, Copy, Check, Folder, FileCode, Layers } from 'lucide-react';
 import { fetchGraphData } from '../services';
-
-/* react-force-graph-2d is chunked separately */
-const ForceGraph2D = lazy(() => import('react-force-graph-2d'));
 
 export default function NeuralMap({ userId }) {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
@@ -18,8 +15,6 @@ export default function NeuralMap({ userId }) {
   const [filterQuery, setFilterQuery]   = useState('');
   const [announcement, setAnnouncement] = useState('');
   const [copied, setCopied]             = useState(false);
-  
-  const fgRef = useRef();
 
   /* Load graph data */
   useEffect(() => {
@@ -47,19 +42,14 @@ export default function NeuralMap({ userId }) {
     return Array.from(repos);
   }, [graphData]);
 
-  /* Filtered nodes and links */
-  const filteredData = useMemo(() => {
+  /* Filtered nodes */
+  const filteredNodes = useMemo(() => {
     let nodes = graphData.nodes;
-    let links = graphData.links;
 
     /* Filter by selected repository */
     if (selectedRepo !== 'all') {
       nodes = nodes.filter(
         n => n.id === 'ME' || n.id === selectedRepo || n.group === selectedRepo
-      );
-      const nodeIds = new Set(nodes.map(n => n.id));
-      links = links.filter(
-        l => nodeIds.has(l.source.id ?? l.source) && nodeIds.has(l.target.id ?? l.target)
       );
     }
 
@@ -78,183 +68,67 @@ export default function NeuralMap({ userId }) {
         }
       });
       nodes = nodes.filter(n => matchedNodeIds.has(n.id));
-      const nodeIds = new Set(nodes.map(n => n.id));
-      links = links.filter(
-        l => nodeIds.has(l.source.id ?? l.source) && nodeIds.has(l.target.id ?? l.target)
-      );
     }
 
-    return { nodes, links };
+    return nodes;
   }, [graphData, selectedRepo, filterQuery]);
 
-  /* Calculate dynamic cluster visual radius & deterministic constellation coordinates (fx, fy) */
-  const layoutData = useMemo(() => {
-    const rawNodes = filteredData.nodes.map(n => ({ ...n }));
-    const links = filteredData.links;
+  /* Process deterministic repository clusters with duplicate filename disambiguation */
+  const repoClusters = useMemo(() => {
+    if (filteredNodes.length === 0) return [];
 
-    if (rawNodes.length === 0) return { nodes: [], links: [] };
-
-    /* Identify duplicate filenames to render disambiguated relative paths */
+    /* Identify duplicate filenames across all file nodes */
     const nameCounts = {};
-    rawNodes.forEach(n => {
+    filteredNodes.forEach(n => {
       if (n.type === 'file') {
         const fn = n.name || n.id;
         nameCounts[fn] = (nameCounts[fn] || 0) + 1;
       }
     });
 
-    rawNodes.forEach(n => {
-      if (n.type === 'file') {
-        const fn = n.name || n.id;
-        if (nameCounts[fn] > 1 && n.full_path) {
-          const parts = n.full_path.split('/');
-          n.displayName = parts.length > 1 ? parts.slice(-2).join('/') : n.full_path;
-        } else {
-          n.displayName = fn;
-        }
-      } else {
-        n.displayName = n.name || n.id;
-      }
-    });
+    /* Find all repository nodes or groups */
+    const repos = filteredNodes.filter(n => n.type === 'repo');
+    const fallbackGroups = new Set(
+      filteredNodes
+        .filter(n => n.type === 'file' && n.group)
+        .map(n => n.group)
+    );
 
-    /* Find central core node */
-    const coreNode = rawNodes.find(n => n.id === 'ME' || n.type === 'core');
-    if (coreNode) {
-      coreNode.fx = 0;
-      coreNode.fy = 0;
-    }
+    const repoNames = Array.from(new Set([
+      ...repos.map(r => r.id),
+      ...Array.from(fallbackGroups)
+    ]));
 
-    /* Group repos and calculate dynamic visual radius for each cluster */
-    const repoNodes = rawNodes.filter(n => n.type === 'repo');
-    
-    const repoClusters = repoNodes.map((repoNode) => {
-      const repoFiles = rawNodes.filter(
-        n => n.type === 'file' && (n.group === repoNode.id || n.group === repoNode.name)
-      );
+    return repoNames.map((repoName) => {
+      const repoNode = repos.find(r => r.id === repoName) || {
+        id: repoName,
+        name: repoName,
+        type: 'repo',
+        group: repoName,
+        color: '#818cf8'
+      };
 
-      /* Calculate ring count & outermost file ring radius */
-      let numRings = 0;
-      if (repoFiles.length > 0) {
-        let remaining = repoFiles.length;
-        let r = 1;
-        while (remaining > 0) {
-          const cap = Math.floor(8 + r * 6);
-          remaining -= cap;
-          numRings = r;
-          r++;
-        }
-      }
-
-      const outermostRingRadius = repoFiles.length === 0 ? 0 : 145 + (numRings - 1) * 115;
-      
-      /* Calculate maximum visible label half-width for this repository */
-      let maxLabelHalfWidth = 35;
-      repoFiles.forEach(f => {
-        const labelText = f.displayName || f.name || f.id;
-        const approxHalfWidth = Math.min(110, Math.max(30, (labelText.length * 7.5) / 2));
-        if (approxHalfWidth > maxLabelHalfWidth) {
-          maxLabelHalfWidth = approxHalfWidth;
-        }
-      });
-
-      const nodeRadius = 5;
-      const minOuterPadding = 25;
-
-      /* Formula: clusterVisualRadius = outermostFileRingRadius + maximum visible label half-width + node radius + minimum outer padding */
-      const visualRadius = outermostRingRadius + maxLabelHalfWidth + nodeRadius + minOuterPadding;
+      const files = filteredNodes
+        .filter(n => n.type === 'file' && (n.group === repoName || n.id.startsWith(`${repoName}:`)))
+        .map(fileNode => {
+          const fn = fileNode.name || fileNode.id;
+          let displayName = fn;
+          if (nameCounts[fn] > 1 && fileNode.full_path) {
+            const parts = fileNode.full_path.split('/');
+            displayName = parts.length > 1 ? parts.slice(-2).join('/') : fileNode.full_path;
+          }
+          return {
+            ...fileNode,
+            displayName
+          };
+        });
 
       return {
         repoNode,
-        repoFiles,
-        numRings,
-        visualRadius,
+        files
       };
-    });
-
-    /* Calculate multi-repository center positions ensuring:
-       distance >= clusterA.visualRadius + clusterB.visualRadius + 80px gap */
-    const M = repoClusters.length;
-    if (M === 1) {
-      repoClusters[0].repoNode.fx = 0;
-      repoClusters[0].repoNode.fy = 0;
-    } else if (M > 1) {
-      let maxRequiredSeparation = 0;
-      for (let i = 0; i < M; i++) {
-        const nextIdx = (i + 1) % M;
-        const requiredSep = repoClusters[i].visualRadius + repoClusters[nextIdx].visualRadius + 80;
-        if (requiredSep > maxRequiredSeparation) {
-          maxRequiredSeparation = requiredSep;
-        }
-      }
-
-      const hubRadius = Math.max(480, maxRequiredSeparation / (2 * Math.sin(Math.PI / M)));
-
-      repoClusters.forEach((cluster, idx) => {
-        const angle = (2 * Math.PI * idx) / M - Math.PI / 2;
-        cluster.repoNode.fx = Math.round(hubRadius * Math.cos(angle));
-        cluster.repoNode.fy = Math.round(hubRadius * Math.sin(angle));
-      });
-    }
-
-    /* Position file nodes in concentric rings around their repository center */
-    repoClusters.forEach((cluster) => {
-      const repoX = cluster.repoNode.fx ?? 0;
-      const repoY = cluster.repoNode.fy ?? 0;
-
-      let currentRing = 1;
-      let ringIndex = 0;
-
-      cluster.repoFiles.forEach((fileNode) => {
-        const ringRadius = 145 + (currentRing - 1) * 115;
-        const ringCapacity = Math.floor(8 + currentRing * 6);
-
-        const angleOffset = (currentRing % 2 === 0 ? 0.3 : 0);
-        const angle = (2 * Math.PI * ringIndex) / ringCapacity + angleOffset - Math.PI / 2;
-
-        fileNode.fx = Math.round(repoX + ringRadius * Math.cos(angle));
-        fileNode.fy = Math.round(repoY + ringRadius * Math.sin(angle));
-
-        ringIndex++;
-        if (ringIndex >= ringCapacity) {
-          currentRing++;
-          ringIndex = 0;
-        }
-      });
-    });
-
-    /* Position standalone files if any */
-    const standaloneFiles = rawNodes.filter(
-      n => n.type === 'file' && (n.fx === undefined || n.fy === undefined)
-    );
-    standaloneFiles.forEach((fn, idx) => {
-      const angle = (2 * Math.PI * idx) / (standaloneFiles.length || 1);
-      fn.fx = Math.round(200 * Math.cos(angle));
-      fn.fy = Math.round(200 * Math.sin(angle));
-    });
-
-    return { nodes: rawNodes, links };
-  }, [filteredData]);
-
-  /* Fit graph view after layout updates */
-  useEffect(() => {
-    if (!loading && fgRef.current && viewMode === 'graph') {
-      const timer = setTimeout(() => {
-        const fg = fgRef.current;
-        if (!fg) return;
-        fg.zoomToFit(400, 60);
-      }, 150);
-
-      return () => clearTimeout(timer);
-    }
-  }, [loading, viewMode, layoutData]);
-
-  /* Center view handler */
-  const handleCenterView = () => {
-    if (fgRef.current) {
-      fgRef.current.zoomToFit(400, 60);
-      setAnnouncement('Graph view centered and fitted to viewport.');
-    }
-  };
+    }).filter(cluster => cluster.files.length > 0 || selectedRepo === cluster.repoNode.id);
+  }, [filteredNodes, selectedRepo]);
 
   /* Node click handler */
   const handleNodeClick = (node) => {
@@ -262,11 +136,6 @@ export default function NeuralMap({ userId }) {
     const label = node.displayName || node.name || node.id;
     const typeStr = node.type === 'repo' ? 'repository' : node.type === 'core' ? 'Neural Core' : 'file';
     setAnnouncement(`Selected ${typeStr} node ${label}.`);
-
-    if (node.type === 'repo' && fgRef.current) {
-      fgRef.current.centerAt(node.fx ?? node.x, node.fy ?? node.y, 400);
-      fgRef.current.zoom(2.2, 400);
-    }
   };
 
   /* Copy file path helper */
@@ -276,7 +145,7 @@ export default function NeuralMap({ userId }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const isEmpty = !loading && !error && layoutData.nodes.length === 0;
+  const isEmpty = !loading && !error && repoClusters.length === 0;
 
   return (
     <section className="neural-map-section" aria-labelledby="neural-map-heading">
@@ -299,7 +168,7 @@ export default function NeuralMap({ userId }) {
               aria-pressed={viewMode === 'graph'}
               onClick={() => {
                 setViewMode('graph');
-                setAnnouncement('Switched to interactive Graph view.');
+                setAnnouncement('Switched to deterministic SVG Knowledge Map view.');
               }}
               aria-label="Show graph view"
             >
@@ -320,18 +189,6 @@ export default function NeuralMap({ userId }) {
               Table
             </button>
           </div>
-
-          {viewMode === 'graph' && (
-            <button
-              type="button"
-              className="btn-ghost nm-center-btn"
-              onClick={handleCenterView}
-              aria-label="Center and fit graph to viewport"
-            >
-              <Maximize2 size={14} aria-hidden="true" />
-              Center view
-            </button>
-          )}
         </div>
       </div>
 
@@ -351,7 +208,7 @@ export default function NeuralMap({ userId }) {
               onChange={(e) => {
                 setSelectedRepo(e.target.value);
                 setSelectedNode(null);
-                setAnnouncement(`Filtered graph by repository: ${e.target.value}`);
+                setAnnouncement(`Filtered map by repository: ${e.target.value}`);
               }}
               aria-label="Filter graph by repository"
             >
@@ -417,97 +274,20 @@ export default function NeuralMap({ userId }) {
         </div>
       )}
 
-      {/* Graph View */}
+      {/* Deterministic SVG Graph View */}
       {!loading && !error && !isEmpty && viewMode === 'graph' && (
-        <div className="nm-graph-wrapper">
-          <div
-            className="nm-graph-container"
-            aria-label="Repository-to-file knowledge graph canvas"
-          >
-            <Suspense fallback={
-              <div className="loading-panel" role="status">
-                <div className="loading-spinner" aria-hidden="true" />
-                <span>Loading graph renderer…</span>
-              </div>
-            }>
-              <ForceGraph2D
-                ref={fgRef}
-                graphData={layoutData}
-                nodeColor={(node) => {
-                  if (selectedNode?.id === node.id) return '#22d3ee';
-                  if (node.type === 'core') return '#38bdf8';
-                  if (node.type === 'repo') return '#818cf8';
-                  return '#94a3b8';
-                }}
-                nodeVal={(node) => {
-                  if (node.type === 'core') return 12;
-                  if (node.type === 'repo') return 9;
-                  return 5;
-                }}
-                linkColor={() => 'rgba(56, 189, 248, 0.25)'}
-                linkWidth={1.5}
-                backgroundColor="transparent"
-                enableNodeDrag={true}
-                enableZoom={true}
+        <div className="nm-svg-wrapper">
+          <div className="nm-svg-container">
+            {repoClusters.map((cluster) => (
+              <SvgRepositoryCard
+                key={cluster.repoNode.id}
+                cluster={cluster}
+                selectedNode={selectedNode}
+                hoveredNode={hoveredNode}
                 onNodeClick={handleNodeClick}
-                onNodeHover={(node) => setHoveredNode(node)}
-                nodeCanvasObjectMode={() => 'after'}
-                nodeCanvasObject={(node, ctx, globalScale) => {
-                  const isRepo = node.type === 'repo';
-                  const isSelected = selectedNode?.id === node.id;
-                  const isHovered = hoveredNode?.id === node.id;
-                  const scale = globalScale || 1.0;
-
-                  /* Highlight ring on hover or selection */
-                  if (isSelected || isHovered) {
-                    ctx.beginPath();
-                    ctx.arc(node.x, node.y, (node.val || 5) + 3, 0, 2 * Math.PI);
-                    ctx.strokeStyle = isSelected ? '#22d3ee' : '#38bdf8';
-                    ctx.lineWidth = 2 / scale;
-                    ctx.stroke();
-                  }
-
-                  const label = node.displayName || node.name || node.id;
-                  const fontSize = Math.max(10, Math.min(13, 11 / scale));
-                  ctx.font = `${fontSize}px Outfit, Inter, sans-serif`;
-                  ctx.textAlign = 'center';
-                  ctx.textBaseline = 'top';
-
-                  const textWidth = ctx.measureText(label).width;
-                  const padX = 6 / scale;
-                  const padY = 2 / scale;
-                  const yOffset = (node.val || 5) + 4 / scale;
-
-                  /* High contrast permanent label pill background */
-                  ctx.fillStyle = isSelected
-                    ? 'rgba(6, 182, 212, 0.95)'
-                    : isRepo
-                    ? 'rgba(30, 27, 75, 0.95)'
-                    : 'rgba(15, 23, 42, 0.92)';
-                  
-                  ctx.beginPath();
-                  ctx.roundRect(
-                    node.x - textWidth / 2 - padX,
-                    node.y + yOffset - padY,
-                    textWidth + padX * 2,
-                    fontSize + padY * 2,
-                    3 / scale
-                  );
-                  ctx.fill();
-                  ctx.strokeStyle = isSelected
-                    ? '#22d3ee'
-                    : isRepo
-                    ? '#818cf8'
-                    : 'rgba(56, 189, 248, 0.4)';
-                  ctx.lineWidth = 0.8 / scale;
-                  ctx.stroke();
-
-                  /* Permanent white text label */
-                  ctx.fillStyle = isSelected ? '#07090f' : '#f8fafc';
-                  ctx.fillText(label, node.x, node.y + yOffset);
-                }}
+                onNodeHover={setHoveredNode}
               />
-            </Suspense>
+            ))}
           </div>
 
           {/* Node Details Side Panel */}
@@ -584,7 +364,7 @@ export default function NeuralMap({ userId }) {
               </tr>
             </thead>
             <tbody>
-              {layoutData.nodes.map((node, idx) => (
+              {filteredNodes.map((node, idx) => (
                 <tr key={node.id ?? idx}>
                   <td className="nm-cell-name">{node.name ?? node.id}</td>
                   <td className="nm-cell-path">
@@ -597,10 +377,203 @@ export default function NeuralMap({ userId }) {
             </tbody>
           </table>
           <p className="nm-table-summary">
-            Showing {layoutData.nodes.length} nodes and {layoutData.links.length} relationships
+            Showing {filteredNodes.length} nodes
           </p>
         </div>
       )}
     </section>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Deterministic SVG Repository Cluster Component
+   Renders repository hub and file nodes in a 100% zero-overlap grid
+   ───────────────────────────────────────────────────────────── */
+function SvgRepositoryCard({ cluster, selectedNode, hoveredNode, onNodeClick, onNodeHover }) {
+  const { repoNode, files } = cluster;
+
+  /* Layout Constants */
+  const cols = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(files.length))));
+  const cardWidth = 720;
+  const colWidth = Math.floor((cardWidth - 60) / cols);
+  const rowHeight = 44;
+  const headerHeight = 70;
+  
+  const numRows = Math.ceil(files.length / cols);
+  const cardHeight = headerHeight + Math.max(1, numRows) * rowHeight + 30;
+
+  const hubX = cardWidth / 2;
+  const hubY = 36;
+
+  return (
+    <div className="svg-cluster-card" aria-label={`Repository cluster for ${repoNode.name}`}>
+      <svg
+        viewBox={`0 0 ${cardWidth} ${cardHeight}`}
+        className="svg-cluster-canvas"
+        width="100%"
+        height={cardHeight}
+        role="img"
+        aria-label={`Knowledge map diagram for repository ${repoNode.name} containing ${files.length} indexed files`}
+      >
+        <defs>
+          <linearGradient id={`grad-repo-${repoNode.id}`} x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#1e1b4b" stopOpacity="0.95" />
+            <stop offset="100%" stopColor="#0f172a" stopOpacity="0.95" />
+          </linearGradient>
+        </defs>
+
+        {/* Outer Card Background */}
+        <rect
+          x="2"
+          y="2"
+          width={cardWidth - 4}
+          height={cardHeight - 4}
+          rx="12"
+          fill={`url(#grad-repo-${repoNode.id})`}
+          stroke="rgba(129, 140, 248, 0.3)"
+          strokeWidth="1.5"
+        />
+
+        {/* File Node Grid & Connector Lines */}
+        {files.map((file, idx) => {
+          const col = idx % cols;
+          const row = Math.floor(idx / cols);
+
+          const fileX = 40 + col * colWidth + 12;
+          const fileY = headerHeight + row * rowHeight + 20;
+
+          const isSelected = selectedNode?.id === file.id;
+          const isHovered = hoveredNode?.id === file.id;
+
+          const labelText = file.displayName || file.name || file.id;
+          const approxLabelWidth = Math.min(colWidth - 36, Math.max(60, labelText.length * 7.5));
+
+          return (
+            <g
+              key={file.id}
+              className={`svg-node-group ${isSelected ? 'selected' : ''} ${isHovered ? 'hovered' : ''}`}
+              onClick={() => onNodeClick(file)}
+              onMouseEnter={() => onNodeHover(file)}
+              onMouseLeave={() => onNodeHover(null)}
+              style={{ cursor: 'pointer' }}
+              tabIndex={0}
+              role="button"
+              aria-label={`File node ${labelText} in ${repoNode.name}`}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onNodeClick(file);
+                }
+              }}
+            >
+              {/* Connector Link from Hub to File Node */}
+              <path
+                d={`M ${hubX} ${hubY + 16} Q ${hubX + (fileX - hubX) * 0.5} ${hubY + (fileY - hubY) * 0.5} ${fileX} ${fileY}`}
+                fill="none"
+                stroke={isSelected ? '#22d3ee' : isHovered ? '#38bdf8' : 'rgba(56, 189, 248, 0.25)'}
+                strokeWidth={isSelected || isHovered ? 2 : 1}
+                strokeDasharray={isSelected ? 'none' : '3 3'}
+                aria-hidden="true"
+              />
+
+              {/* File Node Circle */}
+              <circle
+                cx={fileX}
+                cy={fileY}
+                r={isSelected ? 7 : isHovered ? 6 : 5}
+                fill={isSelected ? '#22d3ee' : isHovered ? '#38bdf8' : '#94a3b8'}
+                stroke={isSelected ? '#07090f' : '#1e293b'}
+                strokeWidth="1.5"
+              />
+
+              {/* High Contrast Filename Label Pill Background */}
+              <rect
+                x={fileX + 10}
+                y={fileY - 11}
+                width={approxLabelWidth + 12}
+                height="22"
+                rx="4"
+                fill={isSelected ? 'rgba(6, 182, 212, 0.95)' : isHovered ? 'rgba(15, 23, 42, 0.98)' : 'rgba(15, 23, 42, 0.92)'}
+                stroke={isSelected ? '#22d3ee' : isHovered ? '#38bdf8' : 'rgba(56, 189, 248, 0.3)'}
+                strokeWidth="1"
+              />
+
+              {/* Permanent Filename Label Text */}
+              <text
+                x={fileX + 16}
+                y={fileY + 3}
+                fill={isSelected ? '#07090f' : '#f8fafc'}
+                fontSize="11.5"
+                fontFamily="Outfit, Inter, sans-serif"
+                fontWeight={isSelected ? '700' : '500'}
+              >
+                {labelText.length > 24 ? labelText.slice(0, 22) + '…' : labelText}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Repository Header Hub (Rendered on top) */}
+        <g
+          className="svg-hub-group"
+          onClick={() => onNodeClick(repoNode)}
+          onMouseEnter={() => onNodeHover(repoNode)}
+          onMouseLeave={() => onNodeHover(null)}
+          style={{ cursor: 'pointer' }}
+          role="button"
+          tabIndex={0}
+          aria-label={`Repository hub ${repoNode.name}`}
+        >
+          {/* Header Pill Badge */}
+          <rect
+            x={hubX - 140}
+            y={hubY - 18}
+            width="280"
+            height="36"
+            rx="18"
+            fill="rgba(30, 27, 75, 0.95)"
+            stroke="#818cf8"
+            strokeWidth="2"
+          />
+
+          {/* Hub Icon / Circle */}
+          <circle cx={hubX - 115} cy={hubY} r="8" fill="#818cf8" />
+
+          {/* Hub Name Text */}
+          <text
+            x={hubX - 98}
+            y={hubY + 5}
+            fill="#ffffff"
+            fontSize="14"
+            fontFamily="Outfit, sans-serif"
+            fontWeight="700"
+            letterSpacing="0.05em"
+          >
+            {repoNode.name.length > 18 ? repoNode.name.slice(0, 16) + '…' : repoNode.name}
+          </text>
+
+          {/* File Count Badge */}
+          <rect
+            x={hubX + 80}
+            y={hubY - 10}
+            width="42"
+            height="20"
+            rx="10"
+            fill="rgba(129, 140, 248, 0.25)"
+          />
+          <text
+            x={hubX + 101}
+            y={hubY + 4}
+            fill="#818cf8"
+            fontSize="10.5"
+            fontFamily="Inter, sans-serif"
+            fontWeight="700"
+            textAnchor="middle"
+          >
+            {files.length} files
+          </text>
+        </g>
+      </svg>
+    </div>
   );
 }
