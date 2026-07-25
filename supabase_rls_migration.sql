@@ -78,6 +78,7 @@ RETURNS TABLE (
   source_url text,
   similarity float4
 )
+LANGUAGE plpgsql
 SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
@@ -106,7 +107,7 @@ BEGIN
   ORDER BY code_snippets.embedding <=> query_embedding
   LIMIT match_count;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 -- Service Role Privilege Note:
 -- The Supabase Service-Role Key bypasses Row Level Security.

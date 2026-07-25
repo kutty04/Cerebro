@@ -150,6 +150,7 @@ RETURNS TABLE (
   source_url text,
   similarity float4
 )
+LANGUAGE plpgsql
 SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
@@ -174,6 +175,7 @@ RETURNS TABLE (
   source_url text,
   similarity float4
 )
+LANGUAGE plpgsql
 SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
@@ -204,7 +206,7 @@ BEGIN
   ORDER BY code_snippets.embedding <=> query_embedding
   LIMIT match_count;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 -- Restrict function execution to authenticated and anon users explicitly
 REVOKE ALL ON FUNCTION search_code_snippets(vector, int, text, uuid, text) FROM public;
@@ -229,6 +231,7 @@ CREATE OR REPLACE FUNCTION promote_repository_index(
   p_commit_sha text
 )
 RETURNS boolean
+LANGUAGE plpgsql
 SECURITY INVOKER
 SET search_path = public, pg_temp
 AS $$
@@ -300,7 +303,7 @@ BEGIN
 
   RETURN true;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 REVOKE ALL ON FUNCTION promote_repository_index(uuid, uuid, uuid, text, text) FROM public, anon, authenticated;
 GRANT EXECUTE ON FUNCTION promote_repository_index(uuid, uuid, uuid, text, text) TO service_role;
