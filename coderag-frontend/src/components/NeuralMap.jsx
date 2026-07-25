@@ -54,6 +54,8 @@ export default function NeuralMap({ userId }) {
   }, [loading, viewMode, graphData]);
 
   const drawNodeLabel = useCallback((node, ctx, globalScale) => {
+    if (!node || typeof node.x !== 'number' || typeof node.y !== 'number') return;
+
     const label = node.name || '';
     const size = node.val || 5;
     const scale = globalScale || 1.0;
