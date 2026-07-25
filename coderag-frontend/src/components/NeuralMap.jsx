@@ -30,9 +30,15 @@ export default function NeuralMap({ userId }) {
     if (!loading && fgRef.current && viewMode === 'graph') {
       const t = setTimeout(() => {
         fgRef.current?.zoomToFit(400);
-        // Spacing out forces
-        fgRef.current.d3Force('charge')?.strength(-160);
-        fgRef.current.d3Force('link')?.distance(65);
+        
+        // Push nodes much further apart (increase charge repulsion strength)
+        fgRef.current.d3Force('charge')?.strength(-350);
+        
+        // Set link distance significantly wider
+        fgRef.current.d3Force('link')?.distance(100);
+        
+        // Explicitly reheat simulation to compute new spaced positions
+        fgRef.current.d3ReheatSimulation();
       }, 500);
       return () => clearTimeout(t);
     }
