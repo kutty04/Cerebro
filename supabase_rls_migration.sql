@@ -30,7 +30,6 @@ CREATE TABLE IF NOT EXISTS user_conversations (
 
 -- Indexes for fast user/repo and conversation ownership lookups
 CREATE INDEX IF NOT EXISTS idx_user_repos_owner ON user_repositories(user_id, repo_name);
-CREATE INDEX IF NOT EXISTS idx_code_snippets_user_repo ON code_snippets(user_id, repo_name);
 CREATE INDEX IF NOT EXISTS idx_user_conversations_owner ON user_conversations(user_id);
 
 -- 3. Safe Migration Strategy for Legacy Data:
