@@ -49,7 +49,7 @@ async def get_current_user(request: Request) -> AuthenticatedUser:
         )
 
     supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_KEY")
+    supabase_key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
     if not supabase_url or not supabase_key:
         logger.error("Supabase credentials unconfigured during auth verification [op=verify_token]")
