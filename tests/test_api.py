@@ -804,3 +804,153 @@ def test_default_backend_port_is_7860():
                 failures.append(f"{rel_path}: found forbidden pattern [{pattern}]")
 
     assert not failures, "URL default inconsistencies:\n" + "\n".join(f"  - {f}" for f in failures)
+
+
+# ----------------------------------------------------------------------
+# END-TO-END INGESTION GUARANTEE INTEGRATION TESTS
+# ----------------------------------------------------------------------
+
+def test_ingestion_guarantees_repository_listing_graph_and_search(client):
+    """
+    End-to-End Integration Contract:
+    Authenticated user ingests a repository -> /user-repos lists repo -> /graph-data returns file nodes -> /search retrieves snippets.
+    """
+    mock_db = MagicMock()
+    mock_user_id = "user-123"
+
+    # Mock user_repositories resolution & status updates
+    repo_data = {
+        "id": "repo-uuid-999",
+        "user_id": mock_user_id,
+        "repository_name": "test-e2e-repo",
+        "canonical_url": "https://github.com/kutty04/Cerebro",
+        "active_index_version": "v1",
+        "status": "pending"
+    }
+
+    job_data = {
+        "id": "job-uuid-888",
+        "user_id": mock_user_id,
+        "repository_id": "repo-uuid-999",
+        "status": "pending",
+        "index_version": "v2"
+    }
+
+    mock_db.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value.data = [repo_data]
+    mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [repo_data]
+    mock_db.table.return_value.insert.return_value.execute.return_value.data = [job_data]
+    mock_db.table.return_value.update.return_value.eq.return_value.eq.return_value.execute.return_value.data = [repo_data]
+
+    # Mock git clone & DNS & state transitions & LLM grounding
+    with patch("app.db", mock_db), \
+         patch("app.validate_dns_ip_safety", return_value=True), \
+         patch("db_adapter.DatabaseAdapter.validate_repo_state_transition"), \
+         patch("db_adapter.DatabaseAdapter.validate_job_state_transition"), \
+         patch("db_adapter.DatabaseAdapter.promote_index_version"), \
+         patch("db_adapter.DatabaseAdapter.list_owned_repos", return_value=[repo_data]), \
+         patch("app.rate_limiter.check_and_record"), \
+         patch("app.concurrency_manager.acquire"), \
+         patch("app.concurrency_manager.release"), \
+         patch("app.run_safe_git_clone", return_value=0), \
+         patch("app.get_dir_size_bytes", return_value=1000), \
+         patch("app.CodeIndexer.scan_repos") as mock_scan, \
+         patch("app.CodeIndexer.index_snippets") as mock_index_snips, \
+         patch("app.get_embedding", return_value=[0.1] * 384), \
+         patch("app.http_client") as mock_http:
+
+        mock_http.post.return_value.status_code = 200
+        mock_http.post.return_value.json.return_value = {
+            "choices": [{
+                "message": {
+                    "content": '```json\n{"answer": "Hello World", "summary": "Summary", "citation_ids": ["101"], "follow_ups": [], "limitations": []}\n```'
+                }
+            }]
+        }
+        mock_scan.return_value = [
+            {
+                "repo_name": "test-e2e-repo",
+                "file_path": "src/App.jsx",
+                "language": "javascript",
+                "code_content": "export default function App() { return <div>Hello World</div>; }",
+                "source_url": "https://github.com/owner/test-e2e-repo/blob/main/src/App.jsx",
+                "content_hash": "hash123"
+            }
+        ]
+        mock_index_snips.return_value = [101]
+
+        # 1. POST /ingest
+        ingest_res = client.post("/ingest", json={"repo_url": "https://github.com/kutty04/Cerebro"}, headers=AUTH_HEADERS)
+        assert ingest_res.status_code == 200, f"Failed with {ingest_res.status_code}: {ingest_res.json()}"
+        ingest_body = ingest_res.json()
+        assert ingest_body["status"] == "success"
+        assert ingest_body["indexed_count"] == 1
+
+        # 2. GET /user-repos
+        with patch("db_adapter.DatabaseAdapter.list_owned_repos", return_value=[repo_data]):
+            user_repos_res = client.get("/user-repos", headers=AUTH_HEADERS)
+            assert user_repos_res.status_code == 200
+            assert "test-e2e-repo" in user_repos_res.json()["repos"]
+
+        # 3. GET /graph-data
+        mock_snippet_row = {
+            "id": 101,
+            "repo_name": "test-e2e-repo",
+            "file_path": "src/App.jsx",
+            "language": "javascript",
+            "code_content": "export default function App() { return <div>Hello World</div>; }",
+            "user_id": mock_user_id,
+            "repository_id": "repo-uuid-999",
+            "index_version": "v2"
+        }
+        mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value.data = [mock_snippet_row]
+        graph_res = client.get("/graph-data", headers=AUTH_HEADERS)
+        assert graph_res.status_code == 200
+        nodes = graph_res.json()["nodes"]
+        file_nodes = [n for n in nodes if n["type"] == "file"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0]["name"] == "App.jsx"
+
+        # 4. POST /search
+        mock_snippet_row = {
+            "id": 101,
+            "repo_name": "test-e2e-repo",
+            "file_path": "src/App.jsx",
+            "language": "javascript",
+            "code_content": "export default function App() { return <div>Hello World</div>; }",
+            "source_url": "https://github.com/owner/test-e2e-repo/blob/main/src/App.jsx",
+            "repository_id": "repo-uuid-999",
+            "index_version": "v1"
+        }
+
+        mock_rpc_res = MagicMock()
+        mock_rpc_res.data = [mock_snippet_row]
+        mock_db.rpc.return_value.execute.return_value = mock_rpc_res
+        mock_db.table.return_value.select.return_value.eq.return_value.in_.return_value.execute.return_value.data = [mock_snippet_row]
+
+        search_res = client.post("/search", json={"query": "Hello World"}, headers=AUTH_HEADERS)
+        assert search_res.status_code == 200
+        search_body = search_res.json()
+        assert len(search_body["sources"]) > 0
+        assert search_body["sources"][0]["file"] == "src/App.jsx"
+
+
+def test_ingestion_persistence_failure_fails_closed(client):
+    """
+    If index version promotion or DB persistence fails during ingestion,
+    /ingest MUST fail closed and NOT return a false success response.
+    """
+    mock_db = MagicMock()
+
+    with patch("app.db", mock_db), \
+         patch("app.run_safe_git_clone", return_value=0), \
+         patch("app.get_dir_size_bytes", return_value=1000), \
+         patch("app.DatabaseAdapter.resolve_user_repo", return_value={"id": "r-1", "repository_name": "fail-repo"}), \
+         patch("app.DatabaseAdapter.create_ingestion_job", return_value="job-1"), \
+         patch("app.CodeIndexer.scan_repos", return_value=[{"code_content": "test"}]), \
+         patch("app.CodeIndexer.index_snippets", return_value=[1]), \
+         patch("app.DatabaseAdapter.promote_index_version", side_effect=Exception("Database write error")):
+
+        res = client.post("/ingest", json={"repo_url": "https://github.com/owner/fail-repo"}, headers=AUTH_HEADERS)
+        assert res.status_code == 500
+        assert res.json()["detail"] == "Ingestion failed due to an internal error."
+

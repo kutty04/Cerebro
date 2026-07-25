@@ -1168,13 +1168,13 @@ async def ingest_repo(ingest_req: IngestRequest, current_user: AuthenticatedUser
                 "repository_id": repo_id,
                 "ingestion_job_id": job_id,
                 "index_version": new_ver,
-                "indexed_commit_sha": indexer.detected_commit_sha or indexer.commit_sha,
-                "default_branch": indexer.detected_branch,
-                "files_considered": indexer.metrics.get("files_considered", 0),
-                "files_indexed": indexer.metrics.get("files_indexed", 0),
-                "chunks_generated": indexer.metrics.get("chunks_generated", 0),
-                "chunks_deduplicated": indexer.metrics.get("chunks_deduplicated", 0),
-                "indexing_duration_ms": indexer.metrics.get("total_indexing_duration_ms", 0.0),
+                "indexed_commit_sha": getattr(indexer, "detected_commit_sha", None) or getattr(indexer, "commit_sha", None),
+                "default_branch": getattr(indexer, "detected_branch", "main"),
+                "files_considered": getattr(indexer, "metrics", {}).get("files_considered", 0),
+                "files_indexed": getattr(indexer, "metrics", {}).get("files_indexed", 0),
+                "chunks_generated": getattr(indexer, "metrics", {}).get("chunks_generated", 0),
+                "chunks_deduplicated": getattr(indexer, "metrics", {}).get("chunks_deduplicated", 0),
+                "indexing_duration_ms": getattr(indexer, "metrics", {}).get("total_indexing_duration_ms", 0.0),
             }
 
         except HTTPException as he:
