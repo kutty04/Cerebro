@@ -28,10 +28,15 @@ export default function NeuralMap({ userId }) {
 
   useEffect(() => {
     if (!loading && fgRef.current && viewMode === 'graph') {
-      const t = setTimeout(() => fgRef.current?.zoomToFit(400), 500);
+      const t = setTimeout(() => {
+        fgRef.current?.zoomToFit(400);
+        // Spacing out forces
+        fgRef.current.d3Force('charge')?.strength(-160);
+        fgRef.current.d3Force('link')?.distance(65);
+      }, 500);
       return () => clearTimeout(t);
     }
-  }, [loading, viewMode]);
+  }, [loading, viewMode, graphData]);
 
   const isEmpty = !loading && !error && graphData.nodes.length === 0;
 
@@ -139,15 +144,16 @@ export default function NeuralMap({ userId }) {
                 ctx.fillStyle = node.color || '#38bdf8';
                 ctx.fill();
 
-                // Draw text labels
-                const labelFontSize = 3.5;
+                // Draw text labels with capped dynamic scaling
+                const baseFontSize = 4;
+                const labelFontSize = Math.max(3.0, Math.min(12.0, baseFontSize / globalScale));
                 ctx.font = `${labelFontSize}px Outfit, Inter, sans-serif`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 ctx.fillStyle = '#e2e8f0';
 
-                // Display file names and repo names clearly (always show all labels, they will scale down naturally)
-                ctx.fillText(label, node.x, node.y + size + 2.5);
+                // Display file names and repo names clearly
+                ctx.fillText(label, node.x, node.y + size + labelFontSize + 1.0);
               }}
               nodePointerAreaPaint={(node, color, ctx) => {
                 const size = node.val || 5;
