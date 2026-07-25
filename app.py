@@ -605,7 +605,6 @@ async def search(search_req: SearchRequest, current_user: AuthenticatedUser = De
     except Exception as cache_err:
         logger.warning("Cache check failed silently [op=cache_check, exc_type=%s]", type(cache_err).__name__)
 
-    # 3. Embedding generation
     retrieval_start = time.time()
     query_embedding = get_embedding(search_req.query)
     if not query_embedding:

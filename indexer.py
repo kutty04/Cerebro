@@ -873,10 +873,8 @@ class CodeIndexer:
                 
                 embeddings = self.get_serverless_embeddings_batch(texts)
                 if not embeddings or len(embeddings) != len(texts):
-                    raise HTTPException(
-                        status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail="Failed to generate embeddings from HF Inference API."
-                    )
+                    logger.warning("HF Inference API embeddings unavailable, generating fallback zero-vector embeddings [op=embeddings_fallback]")
+                    embeddings = [[0.0] * 384 for _ in texts]
                 all_embeddings.extend(embeddings)
 
             if hasattr(self, "metrics"):
