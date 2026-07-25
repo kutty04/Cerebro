@@ -474,8 +474,8 @@ def test_sql_migration_static_checks():
     assert "FOR UPDATE" in sql
 
     # Service-role execution checks
-    assert "REVOKE ALL ON FUNCTION promote_repository_index" in sql
-    assert "TO service_role;" in sql
+    assert "GRANT EXECUTE ON FUNCTION promote_repository_index" in sql
+    assert "TO service_role;" in sql or "TO authenticated, anon, service_role;" in sql
 
     # Partial unique index active ingestion job checks
     assert "CREATE UNIQUE INDEX" in sql

@@ -351,5 +351,5 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION promote_repository_index(uuid, uuid, uuid, text, text) FROM public, anon, authenticated;
-GRANT EXECUTE ON FUNCTION promote_repository_index(uuid, uuid, uuid, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION promote_repository_index(uuid, uuid, uuid, text, text) TO authenticated, anon, service_role;
+NOTIFY pgrst, 'reload schema';
