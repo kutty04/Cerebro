@@ -88,8 +88,8 @@ async def startup_event():
 
     # 2. Init Supabase
     try:
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_KEY")
+        url = os.getenv("SUPABASE_URL", "https://mhpnecdueyhxyhzmpcwk.supabase.co")
+        key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1ocG5lY2R1ZXloeHloem1wY3drIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODM3NjkyMSwiZXhwIjoyMDkzOTUyOTIxfQ.0QTcRBFZvo3El3oVd1eDxKrV2lpxdtqMifq9g3sNUrs")
         if url and key:
             db = supabase.create_client(url, key)
             logger.info("✅ Supabase client initialized")
