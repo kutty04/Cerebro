@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import supabase
@@ -177,21 +177,43 @@ def validate_repository_ownership(user_id: str, repository_id: Optional[str] = N
 
 
 @app.post("/search", response_model=SearchResponse)
-async def search_code(request: SearchRequest):
+async def search_code(
+    request: SearchRequest,
+    authorization: Optional[str] = Header(None)
+):
     """
     Semantic search across indexed code snippets.
     Supports user isolation, repository-scope isolation, and conversation history.
     """
-    logger.info(f"🔍 Search request: '{request.query}' | repo_filter: '{request.repo_filter}' | repo_id: '{request.repository_id}' | user: '{request.user_id}'")
-
-    if not request.user_id:
+    # 1. Resolve authenticated user identity
+    if authorization:
+        auth_token = authorization.replace("Bearer ", "").strip()
+        authenticated_user_id = auth_token
+        if db:
+            try:
+                user_res = db.auth.get_user(auth_token)
+                if user_res and user_res.user:
+                    authenticated_user_id = str(user_res.user.id)
+            except Exception:
+                pass
+    elif request.user_id:
+        authenticated_user_id = request.user_id
+    else:
         raise HTTPException(status_code=401, detail="Authentication required: missing user context.")
+
+    # 2. Strict User Mismatch Guard: Reject 403 if request.user_id is present in body and differs from authenticated_user_id
+    if authorization and request.user_id:
+        token_val = authorization.replace("Bearer ", "").strip()
+        if request.user_id != token_val and request.user_id != authenticated_user_id:
+            raise HTTPException(status_code=403, detail="User context mismatch: body user_id does not match authenticated identity.")
+
+    logger.info(f"🔍 Search request: '{request.query}' | repo_filter: '{request.repo_filter}' | repo_id: '{request.repository_id}' | auth_user: '{authenticated_user_id}'")
 
     start_time = time.time()
     
-    # 1. Validate ownership & resolve verified repository scope
+    # 3. Validate ownership & resolve verified repository scope using authenticated_user_id
     verified_repo_id, verified_repo_name, verified_active_version = validate_repository_ownership(
-        user_id=request.user_id,
+        user_id=authenticated_user_id,
         repository_id=request.repository_id,
         repo_name=request.repo_filter
     )
@@ -199,10 +221,10 @@ async def search_code(request: SearchRequest):
     repo_scope = verified_repo_id or verified_repo_name or "ALL"
     index_ver = verified_active_version or "v1"
 
-    # Check cache first with tenant + repo + index_version isolation
+    # 4. Check cache first using ONLY authenticated_user_id (never request.user_id)
     cached = get_cached_query(
         query=request.query, 
-        user_id=request.user_id, 
+        user_id=authenticated_user_id, 
         repo_scope=repo_scope, 
         index_version=index_ver
     )
@@ -230,7 +252,7 @@ async def search_code(request: SearchRequest):
         rpc_params = {
             "query_embedding": query_embedding, 
             "match_count": request.top_k,
-            "p_user_id": request.user_id
+            "p_user_id": authenticated_user_id
         }
 
         if verified_repo_id:
@@ -254,7 +276,7 @@ async def search_code(request: SearchRequest):
         if keywords:
             top_keywords = keywords[:3]
             for kw in top_keywords:
-                kw_search = db.table("code_snippets").select("id, repo_name, file_path, language, code_content, source_url, repository_id, index_version").eq("user_id", request.user_id)
+                kw_search = db.table("code_snippets").select("id, repo_name, file_path, language, code_content, source_url, repository_id, index_version").eq("user_id", authenticated_user_id)
                 if verified_repo_id:
                     kw_search = kw_search.eq("repository_id", verified_repo_id)
                 elif verified_repo_name:
@@ -420,7 +442,7 @@ FOLLOW_UPS:
         save_chat("default_thread", request.query, answer_text, sources)
         set_cached_query(
             query=request.query,
-            user_id=request.user_id,
+            user_id=authenticated_user_id,
             repo_scope=repo_scope,
             answer=answer_text,
             sources=sources,
