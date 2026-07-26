@@ -854,24 +854,48 @@ async def get_user_repos(
 
 @app.post("/delete-repo")
 async def delete_repo(
-    repo_name: str, 
+    repository_id: Optional[str] = None,
+    repo_name: Optional[str] = None, 
     user_id: Optional[str] = None,
     authenticated_user_id: str = Depends(get_authenticated_user)
 ):
     """
-    Delete all snippets and repository records associated with a repository for a user.
+    Delete a repository strictly by authenticated target_user_id and valid repository_id UUID.
+    No repo-name-based lookups or deletes are performed.
     """
     if user_id and user_id != authenticated_user_id:
-        raise HTTPException(status_code=403, detail="User context mismatch: user_id parameter does not match authenticated identity.")
+        raise HTTPException(status_code=403, detail="User context mismatch: body user_id does not match authenticated identity.")
 
     target_user_id = authenticated_user_id
+
+    # 1. Require a valid UUID for repository_id
+    if not repository_id:
+        raise HTTPException(status_code=400, detail="Missing required repository_id UUID parameter.")
+
+    import uuid
     try:
-        db.table("code_snippets").delete().eq("repo_name", repo_name).eq("user_id", target_user_id).execute()
-        try:
-            db.table("user_repositories").delete().or_(f"repository_name.eq.{repo_name},repo_name.eq.{repo_name}").eq("user_id", target_user_id).execute()
-        except Exception:
-            pass
-        return {"status": "success", "message": f"Repository {repo_name} deleted"}
+        uuid.UUID(str(repository_id))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=400, detail="Invalid repository_id UUID format.")
+
+    # 2. Verify ownership in user_repositories
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not connected")
+
+    try:
+        user_repo_rows = db.table("user_repositories").select("id, repository_name, repo_name").eq("id", repository_id).eq("user_id", target_user_id).execute()
+        if not user_repo_rows.data or len(user_repo_rows.data) == 0:
+            raise HTTPException(status_code=404, detail="Repository not found or unauthorized deletion.")
+
+        # 3. Delete strictly by (user_id, repository_id)
+        db.table("code_snippets").delete().eq("user_id", target_user_id).eq("repository_id", repository_id).execute()
+        db.table("user_repositories").delete().eq("user_id", target_user_id).eq("id", repository_id).execute()
+
+        display_name = repo_name or user_repo_rows.data[0].get("repository_name") or user_repo_rows.data[0].get("repo_name") or "Repository"
+        return {"status": "success", "message": f"Repository {display_name} deleted", "repository_id": repository_id}
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to delete repo: {type(e).__name__}")
         raise HTTPException(status_code=500, detail=f"Failed to delete repo: {type(e).__name__}")

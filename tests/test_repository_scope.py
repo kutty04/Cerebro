@@ -713,6 +713,97 @@ class TestRepositoryScopeIntegrity:
         nodes = [n["id"] for n in resp_graph.json()["nodes"]]
         assert "ipl" in nodes
 
+    def test_delete_repo_persistence_and_list_consistency(self, mock_embed):
+        """Strict UUID-based deletion tests: rejects invalid/missing UUIDs, deletes only matching UUID row & snippets, leaves orphan snippets and IPL intact."""
+        jarvis_uuid = JARVIS_REPO_ID
+        ipl_uuid = "77777777-7777-7777-7777-777777777777"
+
+        # Ensure IPL is in user_repositories and has a UUID-linked snippet
+        if not any(r.get("id") == ipl_uuid for r in MOCK_REPOSITORIES_DB):
+            MOCK_REPOSITORIES_DB.append({
+                "id": ipl_uuid,
+                "user_id": USER_A_ID,
+                "repository_name": "ipl",
+                "repo_name": "ipl",
+                "repository_owner": "kutty04",
+                "canonical_url": "https://github.com/kutty04/ipl",
+                "provider": "github",
+                "status": "ready",
+                "active_index_version": "v1"
+            })
+        MOCK_SNIPPETS_DB.append({
+            "id": "s_ipl_keep",
+            "user_id": USER_A_ID,
+            "repository_id": ipl_uuid,
+            "repo_name": "ipl",
+            "file_path": "main.py",
+            "code_content": "def keep_ipl(): pass",
+            "index_version": "v1"
+        })
+
+        # Add same-name orphan snippet for Jarvis-portfolio (repository_id = None)
+        ORPHAN_JARVIS_ID = "s_jarvis_orphan_untouched"
+        MOCK_SNIPPETS_DB.append({
+            "id": ORPHAN_JARVIS_ID,
+            "user_id": USER_A_ID,
+            "repository_id": None,
+            "repo_name": "Jarvis-portfolio",
+            "file_path": "orphan_jarvis.py",
+            "code_content": "def orphan_jarvis(): pass",
+            "index_version": "v1"
+        })
+
+        # 1. Missing or invalid repository_id is rejected (400)
+        resp_invalid = client.post(
+            f"/delete-repo?repository_id=not-a-uuid&user_id={USER_A_ID}",
+            headers={"Authorization": f"Bearer {USER_A_ID}"}
+        )
+        assert resp_invalid.status_code == 400
+        assert "Invalid repository_id UUID format" in resp_invalid.json()["detail"]
+
+        # 2. Cross-user deletion is rejected (404)
+        resp_cross = client.post(
+            f"/delete-repo?repository_id={jarvis_uuid}&user_id={USER_B_ID}",
+            headers={"Authorization": f"Bearer {USER_B_ID}"}
+        )
+        assert resp_cross.status_code == 404
+
+        # 3. Delete Jarvis using real UUID
+        resp_del = client.post(
+            f"/delete-repo?repository_id={jarvis_uuid}&repo_name=Jarvis-portfolio&user_id={USER_A_ID}",
+            headers={"Authorization": f"Bearer {USER_A_ID}"}
+        )
+        assert resp_del.status_code == 200
+        assert resp_del.json()["status"] == "success"
+
+        # 4. Verify Jarvis user_repositories row and UUID-linked snippets removed
+        assert not any(r.get("id") == jarvis_uuid for r in MOCK_REPOSITORIES_DB)
+        assert not any(s.get("repository_id") == jarvis_uuid for s in MOCK_SNIPPETS_DB)
+
+        # 5. Verify same-name orphan snippet remains UNTOUCHED (not deleted)
+        orphan_row = next((s for s in MOCK_SNIPPETS_DB if s.get("id") == ORPHAN_JARVIS_ID), None)
+        assert orphan_row is not None, "Same-name orphan snippet must remain untouched and NOT be deleted"
+
+        # 6. Verify IPL remains present and intact in user_repositories and GET /user-repos
+        assert any(r.get("id") == ipl_uuid for r in MOCK_REPOSITORIES_DB)
+        resp_after = client.get(
+            f"/user-repos?user_id={USER_A_ID}",
+            headers={"Authorization": f"Bearer {USER_A_ID}"}
+        )
+        assert resp_after.status_code == 200
+        repos_list = resp_after.json()["repos"]
+        assert "Jarvis-portfolio" not in repos_list
+        assert "ipl" in repos_list
+
+        # 7. Simulate sign-out and sign-in (fresh auth token request to /user-repos)
+        resp_signin = client.get(
+            f"/user-repos?user_id={USER_A_ID}",
+            headers={"Authorization": f"Bearer {USER_A_ID}"}
+        )
+        assert resp_signin.status_code == 200
+        assert "Jarvis-portfolio" not in resp_signin.json()["repos"]
+        assert "ipl" in resp_signin.json()["repos"]
+
     def test_scoped_search_rejects_legacy_null_id_as_repository_id(self, mock_embed):
         """Sending None/null or non-UUID string as repository_id returns 400."""
         response = client.post(

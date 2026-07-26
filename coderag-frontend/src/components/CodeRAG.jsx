@@ -156,10 +156,22 @@ export default function Cerebro({ user }) {
     if (!confirm(`Are you sure you want to delete ${repoName}? This cannot be undone.`)) return;
     
     try {
-      const res = await apiFetch(`/delete-repo?repo_name=${encodeURIComponent(repoName)}&user_id=${user.id}`, { method: 'POST' });
+      const matched = userRepoObjects.find(r => (r.name || r.repo_name || r.repository_name) === repoName);
+      if (!matched || !matched.id) {
+        alert('Cannot delete repository: missing valid repository UUID.');
+        return;
+      }
+      const res = await apiFetch(`/delete-repo?repository_id=${encodeURIComponent(matched.id)}&repo_name=${encodeURIComponent(repoName)}&user_id=${user.id}`, { method: 'POST' });
       if (res.ok) {
         setUserRepos(prev => (Array.isArray(prev) ? prev.filter(r => r !== repoName) : []));
-        setUserRepoObjects(prev => (Array.isArray(prev) ? prev.filter(r => (r.name || r.repo_name || r.repository_name) !== repoName) : []));
+        setUserRepoObjects(prev => (Array.isArray(prev) ? prev.filter(r => r.id !== matched.id && (r.name || r.repo_name || r.repository_name) !== repoName) : []));
+        if (selectedRepoObj && (selectedRepoObj.id === matched.id || (selectedRepoObj.name || selectedRepoObj.repo_name || selectedRepoObj.repository_name) === repoName)) {
+          setSelectedRepoObj(null);
+          setRepoFilter('');
+        }
+        await fetchUserRepos();
+      } else {
+        alert('Failed to delete repository');
       }
     } catch (err) {
       alert('Failed to delete repository');
