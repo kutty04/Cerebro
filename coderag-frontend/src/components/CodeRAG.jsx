@@ -117,6 +117,7 @@ export default function Cerebro({ user }) {
   };
 
   const [userRepos, setUserRepos] = useState([]);
+  const [userRepoDetails, setUserRepoDetails] = useState([]);
   const [repoLoading, setRepoLoading] = useState(false);
 
   const fetchUserRepos = async () => {
@@ -125,13 +126,16 @@ export default function Cerebro({ user }) {
       const res = await apiFetch(`/user-repos?user_id=${user.id}`);
       if (!res.ok) {
         setUserRepos([]);
+        setUserRepoDetails([]);
         return;
       }
       const data = await res.json();
       setUserRepos(Array.isArray(data.repos) ? data.repos : []);
+      setUserRepoDetails(Array.isArray(data.repositories) ? data.repositories : []);
     } catch (err) {
       console.error('Failed to fetch repos:', err);
       setUserRepos([]);
+      setUserRepoDetails([]);
     } finally {
       setRepoLoading(false);
     }
@@ -197,6 +201,9 @@ export default function Cerebro({ user }) {
     setResults(null);
 
     try {
+      const selectedRepoObj = (userRepoDetails || []).find(r => r.repo_name === repoFilter);
+      const selectedRepoId = selectedRepoObj ? selectedRepoObj.id : null;
+
       const response = await apiFetch('/search', {
         method: 'POST',
         body: JSON.stringify({ 
@@ -204,6 +211,7 @@ export default function Cerebro({ user }) {
           top_k: 4,
           user_id: user.id,
           ...(repoFilter ? { repo_filter: repoFilter } : {}),
+          ...(selectedRepoId ? { repository_id: selectedRepoId } : {}),
           history: chatContext
         }),
       });
@@ -325,7 +333,11 @@ export default function Cerebro({ user }) {
 
         {view === 'graph' && (
           <ErrorBoundary fallbackTitle="Neural Map Interrupted">
-            <NeuralMap user={user} />
+            <NeuralMap 
+              user={user} 
+              repoFilter={repoFilter} 
+              repositoryId={(userRepoDetails || []).find(r => r.repo_name === repoFilter)?.id || ''} 
+            />
           </ErrorBoundary>
         )}
 

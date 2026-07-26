@@ -139,11 +139,13 @@ async def search(request: SearchRequest):
     """
     if not db:
         raise HTTPException(status_code=500, detail="Database not initialized")
+    if not request.user_id:
+        raise HTTPException(status_code=401, detail="Authentication required: missing user context.")
 
     start_time = time.time()
     
     # Check SQLite Cache (0 LLM Tokens)
-    cached = get_cached_query(request.query, request.repo_filter)
+    cached = get_cached_query(request.query, request.repo_filter or request.repository_id)
     if cached:
         logger.info("🟢 Cache hit! Returning instant response (0 tokens)")
         latency_ms = (time.time() - start_time) * 1000
@@ -165,17 +167,22 @@ async def search(request: SearchRequest):
         # Step 2: Search pgvector (Semantic)
         logger.info("📚 Searching vector database...")
         
-        search_query = db.rpc(
-            "search_code_snippets",
-            {
-                "query_embedding": query_embedding, 
-                "match_count": request.top_k,
-                "p_user_id": request.user_id
-            },
-        )
+        rpc_params = {
+            "query_embedding": query_embedding, 
+            "match_count": request.top_k,
+            "p_user_id": request.user_id
+        }
+
+        scoped_repo_name = request.repo_filter
+        scoped_repo_id = request.repository_id
+
+        if scoped_repo_id:
+            rpc_params["p_repository_id"] = scoped_repo_id
         
-        if request.repo_filter:
-            search_query = search_query.eq("repo_name", request.repo_filter)
+        search_query = db.rpc("search_code_snippets", rpc_params)
+        
+        if scoped_repo_name:
+            search_query = search_query.eq("repo_name", scoped_repo_name)
         
         vector_results = search_query.execute()
         
@@ -191,14 +198,13 @@ async def search(request: SearchRequest):
         if keywords:
             top_keywords = keywords[:3]
             for kw in top_keywords:
-                kw_search = db.table("code_snippets").select("id, repo_name, file_path, language, code_content, source_url")
+                kw_search = db.table("code_snippets").select("id, repo_name, file_path, language, code_content, source_url, repository_id")
                 if request.user_id:
                     kw_search = kw_search.eq("user_id", request.user_id)
-                if request.repo_filter:
-                    kw_search = kw_search.eq("repo_name", request.repo_filter)
-                
-                if request.user_id:
-                    kw_search = kw_search.eq("user_id", request.user_id)
+                if scoped_repo_name:
+                    kw_search = kw_search.eq("repo_name", scoped_repo_name)
+                if scoped_repo_id:
+                    kw_search = kw_search.eq("repository_id", scoped_repo_id)
                 
                 kw_search = kw_search.ilike("code_content", f"%{kw}%")
                 kw_res = kw_search.limit(request.top_k).execute()
@@ -502,13 +508,18 @@ async def delete_repo(repo_name: str, user_id: str):
 
 
 @app.get("/graph-data")
-async def get_graph_data(user_id: str):
+async def get_graph_data(user_id: str, repo_name: Optional[str] = None, repository_id: Optional[str] = None):
     """
-    Generate graph nodes and links for the user's codebase.
+    Generate graph nodes and links for the user's codebase, optionally scoped by repository.
     """
     try:
-        # Fetch basic metadata for all snippets
-        result = db.table("code_snippets").select("repo_name, file_path").eq("user_id", user_id).execute()
+        query = db.table("code_snippets").select("repo_name, file_path, repository_id").eq("user_id", user_id)
+        if repository_id:
+            query = query.eq("repository_id", repository_id)
+        elif repo_name:
+            query = query.eq("repo_name", repo_name)
+            
+        result = query.execute()
         
         nodes = []
         links = []
@@ -518,9 +529,11 @@ async def get_graph_data(user_id: str):
         # Central Node (The User)
         nodes.append({"id": "ME", "name": "Neural Core", "val": 15, "color": "#38bdf8"})
         
-        for item in result.data:
-            repo = item["repo_name"]
-            file = item["file_path"]
+        for item in (result.data or []):
+            repo = item.get("repo_name")
+            file = item.get("file_path")
+            if not repo or not file:
+                continue
             
             # Repo Node
             if repo not in seen_repos:
@@ -529,9 +542,9 @@ async def get_graph_data(user_id: str):
                 seen_repos.add(repo)
             
             # File Node
-            file_id = f"{repo}:{file}"
+            file_id = f"{repo}/{file}"
             if file_id not in seen_files:
-                nodes.append({"id": file_id, "name": file.split('/')[-1], "val": 4, "color": "#94a3b8"})
+                nodes.append({"id": file_id, "name": file, "val": 5, "color": "#34d399"})
                 links.append({"source": repo, "target": file_id})
                 seen_files.add(file_id)
                 
