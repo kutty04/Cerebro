@@ -8,8 +8,8 @@ from fastapi import HTTPException
 client = TestClient(app)
 
 # Fixtures for multi-tenant and multi-repo tests
-USER_A_ID = "user-a-1111-1111-1111-111111111111"
-USER_B_ID = "user-b-2222-2222-2222-222222222222"
+USER_A_ID = "11111111-1111-1111-1111-111111111111"
+USER_B_ID = "22222222-2222-2222-2222-222222222222"
 
 JARVIS_REPO_ID = "repo-jarvis-aaaa-aaaa-aaaaaaaaaaaa"
 BUS_REPO_ID = "repo-bus-bbbb-bbbb-bbbbbbbbbbbb"
@@ -170,7 +170,19 @@ class MockSupabaseRPC:
         return res
 
 
+class MockSupabaseAuth:
+    def get_user(self, token):
+        user_mock = MagicMock()
+        user_mock.id = token
+        res_mock = MagicMock()
+        res_mock.user = user_mock
+        return res_mock
+
+
 class MockSupabaseDB:
+    def __init__(self):
+        self.auth = MockSupabaseAuth()
+
     def table(self, name):
         return MockSupabaseQuery(name)
 
@@ -183,12 +195,16 @@ class MockSupabaseDB:
 class TestRepositoryScopeIntegrity:
 
     def test_search_scoped_to_jarvis_never_returns_bus_snippets(self, mock_embed):
-        response = client.post("/search", json={
-            "query": "What is this project about?",
-            "user_id": USER_A_ID,
-            "repository_id": JARVIS_REPO_ID,
-            "repo_filter": "Jarvis-portfolio"
-        })
+        response = client.post(
+            "/search",
+            headers={"Authorization": f"Bearer {USER_A_ID}"},
+            json={
+                "query": "What is this project about?",
+                "user_id": USER_A_ID,
+                "repository_id": JARVIS_REPO_ID,
+                "repo_filter": "Jarvis-portfolio"
+            }
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -199,7 +215,10 @@ class TestRepositoryScopeIntegrity:
             assert "tracker.py" not in s["file"]
 
     def test_graph_scoped_to_jarvis_contains_only_jarvis_nodes(self, mock_embed):
-        response = client.get(f"/graph-data?user_id={USER_A_ID}&repository_id={JARVIS_REPO_ID}")
+        response = client.get(
+            f"/graph-data?user_id={USER_A_ID}&repository_id={JARVIS_REPO_ID}",
+            headers={"Authorization": f"Bearer {USER_A_ID}"}
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -209,7 +228,10 @@ class TestRepositoryScopeIntegrity:
         assert all("bus-crowding" not in nid for nid in node_ids)
 
     def test_all_projects_scope_contains_both_repositories(self, mock_embed):
-        response = client.get(f"/graph-data?user_id={USER_A_ID}")
+        response = client.get(
+            f"/graph-data?user_id={USER_A_ID}",
+            headers={"Authorization": f"Bearer {USER_A_ID}"}
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -218,27 +240,38 @@ class TestRepositoryScopeIntegrity:
         assert "bus-crowding" in node_ids
 
     def test_user_b_cannot_query_user_a_repository_id(self, mock_embed):
-        response = client.post("/search", json={
-            "query": "Give me access",
-            "user_id": USER_B_ID,
-            "repository_id": JARVIS_REPO_ID  # User A's repo!
-        })
+        response = client.post(
+            "/search",
+            headers={"Authorization": f"Bearer {USER_B_ID}"},
+            json={
+                "query": "Give me access",
+                "user_id": USER_B_ID,
+                "repository_id": JARVIS_REPO_ID  # User A's repo!
+            }
+        )
 
         assert response.status_code == 400
         assert "Invalid or unauthorized repository selection" in response.json()["detail"]
 
     def test_invalid_repository_id_does_not_fall_back_to_all_repos(self, mock_embed):
-        response = client.post("/search", json={
-            "query": "Show files",
-            "user_id": USER_A_ID,
-            "repository_id": "non-existent-repo-999"
-        })
+        response = client.post(
+            "/search",
+            headers={"Authorization": f"Bearer {USER_A_ID}"},
+            json={
+                "query": "Show files",
+                "user_id": USER_A_ID,
+                "repository_id": "non-existent-repo-999"
+            }
+        )
 
         assert response.status_code == 400
         assert "Invalid or unauthorized repository selection" in response.json()["detail"]
 
     def test_user_repos_returns_authoritative_repositories_list(self, mock_embed):
-        response = client.get(f"/user-repos?user_id={USER_A_ID}")
+        response = client.get(
+            f"/user-repos?user_id={USER_A_ID}",
+            headers={"Authorization": f"Bearer {USER_A_ID}"}
+        )
 
         assert response.status_code == 200
         data = response.json()

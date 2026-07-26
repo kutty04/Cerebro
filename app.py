@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import supabase
@@ -21,7 +21,50 @@ embedder = None
 db = None
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logger = logging.getLogger(__name__)
+
+def get_authenticated_user(authorization: Optional[str] = Header(None)) -> str:
+    """
+    Strict fail-closed authentication dependency.
+    Verifies Bearer token with Supabase Auth and returns the verified user UUID.
+    Fails with HTTP 401 if missing, malformed, invalid, or verification fails.
+    """
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required: missing Authorization header."
+        )
+
+    parts = authorization.strip().split(" ")
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required: malformed Authorization header. Format: Bearer <token>"
+        )
+
+    token = parts[1].strip()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required: empty token."
+        )
+
+    if not db:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication failed: database auth client not initialized."
+        )
+
+    try:
+        user_res = db.auth.get_user(token)
+        if user_res and getattr(user_res, "user", None) and getattr(user_res.user, "id", None):
+            return str(user_res.user.id)
+        raise HTTPException(status_code=401, detail="Invalid or expired authentication token.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"🔒 Token verification error: {str(e)}")
+        raise HTTPException(status_code=401, detail="Authentication failed: invalid or expired token.")
 
 # Initialize FastAPI app
 try:
@@ -179,33 +222,18 @@ def validate_repository_ownership(user_id: str, repository_id: Optional[str] = N
 @app.post("/search", response_model=SearchResponse)
 async def search_code(
     request: SearchRequest,
-    authorization: Optional[str] = Header(None)
+    authenticated_user_id: str = Depends(get_authenticated_user)
 ):
     """
     Semantic search across indexed code snippets.
     Supports user isolation, repository-scope isolation, and conversation history.
     """
-    # 1. Resolve authenticated user identity
-    if authorization:
-        auth_token = authorization.replace("Bearer ", "").strip()
-        authenticated_user_id = auth_token
-        if db:
-            try:
-                user_res = db.auth.get_user(auth_token)
-                if user_res and user_res.user:
-                    authenticated_user_id = str(user_res.user.id)
-            except Exception:
-                pass
-    elif request.user_id:
-        authenticated_user_id = request.user_id
-    else:
-        raise HTTPException(status_code=401, detail="Authentication required: missing user context.")
-
-    # 2. Strict User Mismatch Guard: Reject 403 if request.user_id is present in body and differs from authenticated_user_id
-    if authorization and request.user_id:
-        token_val = authorization.replace("Bearer ", "").strip()
-        if request.user_id != token_val and request.user_id != authenticated_user_id:
-            raise HTTPException(status_code=403, detail="User context mismatch: body user_id does not match authenticated identity.")
+    # 1. Request body mismatch guard: Reject 403 if request.user_id exists and differs from verified authenticated_user_id
+    if request.user_id and request.user_id != authenticated_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="User context mismatch: body user_id does not match authenticated identity."
+        )
 
     logger.info(f"🔍 Search request: '{request.query}' | repo_filter: '{request.repo_filter}' | repo_id: '{request.repository_id}' | auth_user: '{authenticated_user_id}'")
 
@@ -570,11 +598,18 @@ async def ingest_repo(request: IngestRequest):
 
 
 @app.get("/user-repos")
-async def get_user_repos(user_id: str):
+async def get_user_repos(
+    user_id: Optional[str] = None,
+    authenticated_user_id: str = Depends(get_authenticated_user)
+):
     """
     Fetch authoritative repository list for this user from user_repositories.
     Falls back gracefully to code_snippets if user_repositories table is unpopulated.
     """
+    if user_id and user_id != authenticated_user_id:
+        raise HTTPException(status_code=403, detail="User context mismatch: user_id parameter does not match authenticated identity.")
+
+    target_user_id = authenticated_user_id
     if not db:
         raise HTTPException(status_code=500, detail="Database not connected")
     
@@ -582,7 +617,7 @@ async def get_user_repos(user_id: str):
         # 1. Authoritative lookup from user_repositories
         res_repos = db.table("user_repositories").select(
             "id, repository_name, repo_name, canonical_url, active_index_version, status"
-        ).eq("user_id", user_id).execute()
+        ).eq("user_id", target_user_id).execute()
 
         repos_data = res_repos.data or []
         if repos_data:
@@ -605,7 +640,7 @@ async def get_user_repos(user_id: str):
             return {"repos": repos, "repositories": repositories}
 
         # Fallback to code_snippets if user_repositories empty
-        result = db.table("code_snippets").select("repo_name, repository_id").eq("user_id", user_id).execute()
+        result = db.table("code_snippets").select("repo_name, repository_id").eq("user_id", target_user_id).execute()
         repo_map = {}
         for r in (result.data or []):
             name = r.get("repo_name")
@@ -629,12 +664,20 @@ async def get_user_repos(user_id: str):
 
 
 @app.post("/delete-repo")
-async def delete_repo(repo_name: str, user_id: str):
+async def delete_repo(
+    repo_name: str, 
+    user_id: Optional[str] = None,
+    authenticated_user_id: str = Depends(get_authenticated_user)
+):
     """
     Delete all snippets associated with a repository for a user.
     """
+    if user_id and user_id != authenticated_user_id:
+        raise HTTPException(status_code=403, detail="User context mismatch: user_id parameter does not match authenticated identity.")
+
+    target_user_id = authenticated_user_id
     try:
-        db.table("code_snippets").delete().eq("repo_name", repo_name).eq("user_id", user_id).execute()
+        db.table("code_snippets").delete().eq("repo_name", repo_name).eq("user_id", target_user_id).execute()
         return {"status": "success", "message": f"Repository {repo_name} deleted"}
     except Exception as e:
         logger.error(f"❌ Failed to delete repo: {str(e)}")
@@ -642,21 +685,27 @@ async def delete_repo(repo_name: str, user_id: str):
 
 
 @app.get("/graph-data")
-async def get_graph_data(user_id: str, repo_name: Optional[str] = None, repository_id: Optional[str] = None):
+async def get_graph_data(
+    user_id: Optional[str] = None, 
+    repo_name: Optional[str] = None, 
+    repository_id: Optional[str] = None,
+    authenticated_user_id: str = Depends(get_authenticated_user)
+):
     """
     Generate graph nodes and links for the user's codebase, strictly scoped to verified repository when requested.
     """
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Authentication required")
+    if user_id and user_id != authenticated_user_id:
+        raise HTTPException(status_code=403, detail="User context mismatch: user_id parameter does not match authenticated identity.")
 
+    target_user_id = authenticated_user_id
     try:
         verified_repo_id, verified_repo_name, verified_ver = validate_repository_ownership(
-            user_id=user_id,
+            user_id=target_user_id,
             repository_id=repository_id,
             repo_name=repo_name
         )
 
-        query = db.table("code_snippets").select("repo_name, file_path, repository_id").eq("user_id", user_id)
+        query = db.table("code_snippets").select("repo_name, file_path, repository_id").eq("user_id", target_user_id)
         if verified_repo_id:
             query = query.eq("repository_id", verified_repo_id)
         elif verified_repo_name:
