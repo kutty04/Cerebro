@@ -33,8 +33,8 @@ export async function apiFetch(endpoint, options = {}) {
 
   const authHeaders = await getAuthHeaders();
   const headers = {
+    ...(options.headers || {}),
     ...authHeaders,
-    ...(options.headers || {})
   };
 
   const response = await fetch(url, {
