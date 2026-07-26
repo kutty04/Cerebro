@@ -360,7 +360,7 @@ export default function Cerebro({ user }) {
             <NeuralMap 
               user={user} 
               repoFilter={repoFilter} 
-              repositoryId={(userRepoDetails || []).find(r => r.repo_name === repoFilter)?.id || ''} 
+              repositoryId={(userRepoObjects || []).find(r => r.repo_name === repoFilter || r.repository_name === repoFilter)?.id || ''} 
             />
           </ErrorBoundary>
         )}
