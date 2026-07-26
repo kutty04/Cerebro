@@ -197,11 +197,8 @@ export default function Cerebro({ user }) {
     setResults(null);
 
     try {
-      const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
-      const response = await fetch(`${apiUrl}/search`, {
+      const response = await apiFetch('/search', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           query: searchQuery, 
           top_k: 4,
@@ -211,7 +208,10 @@ export default function Cerebro({ user }) {
         }),
       });
 
-      if (!response.ok) throw new Error('Cerebro connection failed');
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || 'Cerebro connection failed');
+      }
       const data = await response.json();
       setResults(data);
       
@@ -223,7 +223,11 @@ export default function Cerebro({ user }) {
       ]);
 
     } catch (err) {
-      setError(err.message || 'Neural link disconnected. Check your backend server.');
+      if (err.message && (err.message.includes('Authentication required') || err.message.includes('session expired'))) {
+        setError('Your session has expired. Please sign in again.');
+      } else {
+        setError(err.message || 'Neural link disconnected. Check your backend server.');
+      }
     } finally {
       setLoading(false);
     }
