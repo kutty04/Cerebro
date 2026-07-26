@@ -644,7 +644,9 @@ async def ingest_repo(
 ):
     """
     Clone a GitHub repo, register a real UUID user_repositories record for authenticated_user_id,
-    index all snippets using that real UUID as repository_id, and mark active.
+    index all snippets using that real UUID as repository_id, and mark status as ready.
+    Idempotent: if snippets already exist for this repository, finalizes status to ready without
+    re-cloning or duplicate snippet indexing.
     """
     if request.user_id and request.user_id != authenticated_user_id:
         raise HTTPException(status_code=403, detail="User context mismatch: body user_id does not match authenticated identity.")
@@ -666,9 +668,9 @@ async def ingest_repo(
     if not db:
         raise HTTPException(status_code=500, detail="Database not connected")
 
-    # 2. Register/Create user_repositories record BEFORE snippet indexing
+    # 2. Register/Create or retrieve existing user_repositories record
     try:
-        existing = db.table("user_repositories").select("id").eq("user_id", target_user_id).or_(f"repository_name.eq.{repo_name},repo_name.eq.{repo_name}").execute()
+        existing = db.table("user_repositories").select("id, status").eq("user_id", target_user_id).or_(f"repository_name.eq.{repo_name},repo_name.eq.{repo_name}").execute()
         if not existing.data:
             ins_res = db.table("user_repositories").insert({
                 "user_id": target_user_id,
@@ -689,34 +691,68 @@ async def ingest_repo(
             db.table("user_repositories").update({
                 "provider": provider,
                 "repository_owner": repo_owner,
-                "canonical_url": canonical_url,
-                "status": "indexing"
+                "canonical_url": canonical_url
             }).eq("id", real_repo_id).execute()
+
+        # 3. Check for existing indexed snippets (Idempotency / Stuck Repository Resume)
+        # Strictly query by user_id and real_repo_id UUID only. Never adopt or backfill by repo_name.
+        res_snippets = db.table("code_snippets").select("id").eq("user_id", target_user_id).eq("repository_id", real_repo_id).execute()
+        existing_snippets = res_snippets.data or []
+
+        if existing_snippets and len(existing_snippets) > 0:
+            logger.info(f"ℹ️ Found {len(existing_snippets)} existing snippets for repository_id '{real_repo_id}'. Finalizing repository status to ready.")
+
+            # Mark status = ready
+            try:
+                db.table("user_repositories").update({
+                    "status": "ready"
+                }).eq("id", real_repo_id).execute()
+            except Exception as final_err:
+                logger.error(f"❌ Finalization update failed: {type(final_err).__name__}")
+                raise HTTPException(status_code=500, detail=f"Ingestion finalization failed: {type(final_err).__name__}")
+
+            return {
+                "status": "success",
+                "message": f"Successfully finalized {len(existing_snippets)} existing snippets",
+                "indexed_count": len(existing_snippets),
+                "repository_id": real_repo_id
+            }
+
     except HTTPException:
         raise
     except Exception as repo_err:
         logger.error(f"❌ Failed to register repository for ingestion: {type(repo_err).__name__}")
         raise HTTPException(status_code=500, detail=f"Repository registration failed: {type(repo_err).__name__}")
 
+    # Set status = indexing before cloning & indexing
+    try:
+        db.table("user_repositories").update({"status": "indexing"}).eq("id", real_repo_id).execute()
+    except Exception:
+        pass
+
     temp_dir = tempfile.mkdtemp()
     try:
         logger.info(f"🚀 Ingesting repo '{repo_name}' with UUID '{real_repo_id}' for verified user")
 
-        # 3. Clone the repo
+        # 4. Clone the repo
         git.Repo.clone_from(request.repo_url, temp_dir, depth=1)
 
-        # 4. Initialize Indexer
+        # 5. Initialize Indexer
         indexer = CodeIndexer(repos_path=temp_dir, repo_url=request.repo_url, repo_name=repo_name)
         if not indexer.initialize():
+            try:
+                db.table("user_repositories").update({"status": "failed"}).eq("id", real_repo_id).execute()
+            except Exception:
+                pass
             raise HTTPException(status_code=500, detail="Indexer initialization failed")
 
         indexer.user_id = target_user_id
         indexer.repository_id = real_repo_id
 
-        # 5. Run Indexing
+        # 6. Run Indexing
         snippets = indexer.scan_repos()
         if not snippets:
-            db.table("user_repositories").update({"status": "active"}).eq("id", real_repo_id).execute()
+            db.table("user_repositories").update({"status": "ready"}).eq("id", real_repo_id).execute()
             return {"status": "success", "message": "No indexable code found in repo", "repository_id": real_repo_id}
 
         for snippet in snippets:
@@ -724,10 +760,14 @@ async def ingest_repo(
 
         indexer.index_snippets(snippets)
 
-        # 6. Mark status = active ONLY after indexing succeeds
-        db.table("user_repositories").update({
-            "status": "active"
-        }).eq("id", real_repo_id).execute()
+        # 7. Mark status = ready ONLY after indexing succeeds
+        try:
+            db.table("user_repositories").update({
+                "status": "ready"
+            }).eq("id", real_repo_id).execute()
+        except Exception as final_patch_err:
+            logger.error(f"❌ Ingestion finalization status update failed: {type(final_patch_err).__name__}")
+            raise HTTPException(status_code=500, detail=f"Ingestion finalization failed: {type(final_patch_err).__name__}")
 
         return {
             "status": "success",
@@ -737,9 +777,17 @@ async def ingest_repo(
         }
 
     except HTTPException:
+        try:
+            db.table("user_repositories").update({"status": "failed"}).eq("id", real_repo_id).execute()
+        except Exception:
+            pass
         raise
     except Exception as e:
         logger.error(f"❌ Ingestion failed: {type(e).__name__}")
+        try:
+            db.table("user_repositories").update({"status": "failed"}).eq("id", real_repo_id).execute()
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {type(e).__name__}")
     finally:
         # Cleanup temp directory

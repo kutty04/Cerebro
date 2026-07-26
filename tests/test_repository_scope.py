@@ -468,8 +468,135 @@ class TestRepositoryScopeIntegrity:
             assert ipl_row["repository_owner"] == "kutty04"
             assert ipl_row["canonical_url"] == "https://github.com/kutty04/ipl"
             assert ipl_row["provider"] == "github"
-            assert ipl_row["status"] == "active"
+            assert ipl_row["status"] == "ready"
             assert ipl_row["id"] == real_uuid
+
+    def test_stuck_indexing_repository_with_existing_snippets_finalizes_safely(self, mock_embed):
+        """A repository stuck in indexing that already has snippets is finalized to ready without duplicate cloning or indexing."""
+        STUCK_UUID = "8ab8c650-0b8e-4064-854b-9fe62c33420e"
+        global MOCK_REPOSITORIES_DB, MOCK_SNIPPETS_DB
+        MOCK_REPOSITORIES_DB = [r for r in MOCK_REPOSITORIES_DB if r.get("repo_name") != "ipl"]
+        MOCK_SNIPPETS_DB = [s for s in MOCK_SNIPPETS_DB if s.get("repo_name") != "ipl"]
+
+        # Insert stuck repository record
+        MOCK_REPOSITORIES_DB.append({
+            "id": STUCK_UUID,
+            "user_id": USER_A_ID,
+            "repository_name": "ipl",
+            "repo_name": "ipl",
+            "repository_owner": "kutty04",
+            "canonical_url": "https://github.com/kutty04/ipl",
+            "provider": "github",
+            "status": "indexing",
+            "active_index_version": "v1"
+        })
+
+        # Insert 195 existing snippets created during initial run
+        for i in range(195):
+            MOCK_SNIPPETS_DB.append({
+                "id": f"s_ipl_prod_{i}",
+                "user_id": USER_A_ID,
+                "repository_id": STUCK_UUID,
+                "repo_name": "ipl",
+                "file_path": f"module_{i}.py",
+                "code_content": f"def func_{i}(): pass",
+                "source_url": f"https://github.com/kutty04/ipl/blob/main/module_{i}.py",
+                "index_version": "v1"
+            })
+
+        # Mock CodeIndexer so we can verify it is NEVER called
+        with patch("app.CodeIndexer.scan_repos") as mock_scan, \
+             patch("app.CodeIndexer.index_snippets") as mock_index:
+
+            resp = client.post(
+                "/ingest",
+                headers={"Authorization": f"Bearer {USER_A_ID}"},
+                json={
+                    "repo_url": "https://github.com/kutty04/ipl.git",
+                    "user_id": USER_A_ID
+                }
+            )
+
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "success"
+            assert data["repository_id"] == STUCK_UUID
+            assert data["indexed_count"] == 195
+
+            # Must NOT re-clone or re-scan snippets
+            mock_scan.assert_not_called()
+            mock_index.assert_not_called()
+
+            # Status in DB must now be 'ready'
+            ipl_row = next(r for r in MOCK_REPOSITORIES_DB if r.get("id") == STUCK_UUID)
+            assert ipl_row["status"] == "ready"
+
+            # Must not duplicate repository row
+            matching_rows = [r for r in MOCK_REPOSITORIES_DB if r.get("repo_name") == "ipl" and r.get("user_id") == USER_A_ID]
+            assert len(matching_rows) == 1
+
+            # Must not duplicate snippets
+            matching_snippets = [s for s in MOCK_SNIPPETS_DB if s.get("repo_name") == "ipl" and s.get("user_id") == USER_A_ID]
+            assert len(matching_snippets) == 195
+
+    def test_orphan_snippet_with_same_repo_name_is_never_adopted_or_displayed(self, mock_embed):
+        """An orphan snippet matching repo_name but lacking valid repository_id is never adopted during ingest/resume."""
+        global MOCK_REPOSITORIES_DB, MOCK_SNIPPETS_DB
+        MOCK_REPOSITORIES_DB = [r for r in MOCK_REPOSITORIES_DB if r.get("repo_name") != "ipl"]
+        MOCK_SNIPPETS_DB = [s for s in MOCK_SNIPPETS_DB if s.get("repo_name") != "ipl"]
+
+        # Add orphan snippet with repo_name = 'ipl' and repository_id = None
+        ORPHAN_SNIPPET_ID = "s_ipl_orphan_secret"
+        MOCK_SNIPPETS_DB.append({
+            "id": ORPHAN_SNIPPET_ID,
+            "user_id": USER_A_ID,
+            "repository_id": None,
+            "repo_name": "ipl",
+            "file_path": "legacy_secret.py",
+            "code_content": "def legacy_orphan(): pass",
+            "source_url": "https://github.com/kutty04/ipl/blob/main/legacy_secret.py",
+            "index_version": "v1"
+        })
+
+        with patch("app.CodeIndexer.scan_repos") as mock_scan, \
+             patch("app.CodeIndexer.index_snippets") as mock_index:
+
+            mock_scan.return_value = [
+                {
+                    "repo_name": "ipl",
+                    "file_path": "new_main.py",
+                    "language": "python",
+                    "code_content": "def new_ipl_code(): pass",
+                    "source_url": "https://github.com/kutty04/ipl/blob/main/new_main.py",
+                    "start_line": 1
+                }
+            ]
+
+            resp = client.post(
+                "/ingest",
+                headers={"Authorization": f"Bearer {USER_A_ID}"},
+                json={
+                    "repo_url": "https://github.com/kutty04/ipl.git",
+                    "user_id": USER_A_ID
+                }
+            )
+
+            assert resp.status_code == 200
+            new_uuid = resp.json()["repository_id"]
+            assert new_uuid is not None
+
+            # Verify orphan snippet was NOT adopted or updated with new_uuid
+            orphan_row = next(s for s in MOCK_SNIPPETS_DB if s.get("id") == ORPHAN_SNIPPET_ID)
+            assert orphan_row["repository_id"] is None, "Orphan snippet must retain repository_id=None and NOT be adopted"
+
+            # Verify All Projects Graph omits orphan snippet node
+            resp_graph = client.get(
+                f"/graph-data?user_id={USER_A_ID}",
+                headers={"Authorization": f"Bearer {USER_A_ID}"}
+            )
+            assert resp_graph.status_code == 200
+            node_files = [n.get("label") or n.get("id") for n in resp_graph.json()["nodes"]]
+            assert "legacy_secret.py" not in node_files
 
     def test_failed_repo_registration_prevents_ingest_success(self, mock_embed):
         """If user_repositories record insertion fails, /ingest fails with 500 and does not report success."""
@@ -535,7 +662,7 @@ class TestRepositoryScopeIntegrity:
             "repository_owner": "kutty04",
             "canonical_url": "https://github.com/kutty04/ipl",
             "provider": "github",
-            "status": "active",
+            "status": "ready",
             "active_index_version": "v1"
         })
 
