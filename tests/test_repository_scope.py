@@ -53,7 +53,7 @@ MOCK_SNIPPETS_DB = [
         "repo_name": "Jarvis-portfolio",
         "file_path": "main.py",
         "language": "python",
-        "code_content": "def initialize_jarvis(): print('Jarvis AI online')",
+        "code_content": "def initialize_jarvis(): print('Jarvis AI developer portfolio')",
         "source_url": "https://github.com/kutty04/Jarvis-portfolio/blob/main/main.py",
         "index_version": "v1"
     },
@@ -64,7 +64,7 @@ MOCK_SNIPPETS_DB = [
         "repo_name": "Jarvis-portfolio",
         "file_path": "config.py",
         "language": "python",
-        "code_content": "JARVIS_CONFIG = {'version': '2.0'}",
+        "code_content": "JARVIS_CONFIG = {'type': 'developer_portfolio', 'projects': ['bus_crowding_tracker']}",
         "source_url": "https://github.com/kutty04/Jarvis-portfolio/blob/main/config.py",
         "index_version": "v1"
     },
@@ -208,6 +208,8 @@ class TestRepositoryScopeIntegrity:
 
         assert response.status_code == 200
         data = response.json()
+        assert data["repository_id"] == JARVIS_REPO_ID
+        assert data["index_version"] == "v1"
         assert len(data["sources"]) > 0
         for s in data["sources"]:
             assert s["repo"] == "Jarvis-portfolio"

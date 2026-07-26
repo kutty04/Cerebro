@@ -135,6 +135,8 @@ class SearchResponse(BaseModel):
     query: str
     follow_ups: list = []
     confidence: int = 0
+    repository_id: Optional[str] = None
+    index_version: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -246,6 +248,13 @@ async def search_code(
         repo_name=request.repo_filter
     )
 
+    # Reject HTTP 400 if user selected a repository filter but ownership validation failed or repo has no resolvable UUID
+    if (request.repository_id or request.repo_filter) and not verified_repo_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or unauthorized repository selection: Selected repository has no resolvable repository_id."
+        )
+
     repo_scope = verified_repo_id or verified_repo_name or "ALL"
     index_ver = verified_active_version or "v1"
 
@@ -259,13 +268,15 @@ async def search_code(
     if cached:
         logger.info("⚡ Returning cached answer")
         latency_ms = int((time.time() - start_time) * 1000)
-        log_search(request.query, repo_scope, cached["confidence"], latency_ms)
+        log_search(request.query, repo_scope, cached["confidence"], latency_ms, user_id=authenticated_user_id)
         return SearchResponse(
             answer=cached["answer"],
             sources=cached["sources"],
             query=request.query,
             follow_ups=["How does this connect to other files?", "Can you explain this in more detail?", "Where is this function called?"],
-            confidence=cached["confidence"]
+            confidence=cached["confidence"],
+            repository_id=verified_repo_id,
+            index_version=verified_active_version
         )
 
     try:
@@ -376,7 +387,6 @@ async def search_code(
                 "url": result.get("source_url", ""),
             }
             sources.append(snippet)
-            
             context_parts.append(
                 f"[Snippet {i}] From {snippet['repo']}/{snippet['file']} ({snippet['language']}):\n"
                 f"```{snippet['language']}\n{snippet['code']}\n```"
@@ -389,16 +399,20 @@ async def search_code(
         
         system_prompt = f"""You are a master code expert connected to the Cerebro neural link. Answer the user's question using ONLY the provided code snippets.
 
+REPOSITORIES RETRIEVED: Scope = {repo_scope} (Filter requested: {request.repo_filter or request.repository_id or 'ALL'})
+
 CODE CONTEXT:
 {context}
 
 RULES:
-1. Use ONLY the code context provided above. Do not use outside knowledge.
-2. If the answer, or a closely related concept (e.g. lap time prediction instead of grid prediction), is in the code, explain it and cite the exact file path and function name.
-3. If the context is completely unrelated and contains no useful information, explicitly say "I couldn't find this in the retrieved codebase snippets."
-4. Never hallucinate, guess, or make up APIs.
+1. Use ONLY the code context provided above. Do not use outside knowledge or hallucinate.
+2. Grounding & Scope:
+   - When asked a broad question about a repository as a whole (e.g. "What is the concept of this project?"), understand the structure from all retrieved snippets.
+   - If the repository is a portfolio or multi-project workspace (e.g. `Jarvis-portfolio`), identify it accurately as a personal developer portfolio showcasing projects (such as a bus crowding tracker or other components inside it). Do NOT describe a single subproject as the entire repository concept.
+3. If the answer or a closely related concept is in the code, explain it and cite the exact file path and function name.
+4. If the context is completely unrelated and contains no useful information, explicitly say "I couldn't find this in the retrieved codebase snippets."
 5. Keep your answer concise and include a brief code example if relevant.
-6. Provide exactly 3 short follow-up questions the user could ask next to explore the codebase. Put them at the very end formatted EXACTLY like this:
+6. Provide exactly 3 short follow-up questions at the very end formatted EXACTLY like this:
 FOLLOW_UPS:
 - Question 1
 - Question 2
@@ -426,7 +440,9 @@ FOLLOW_UPS:
                     sources=sources,
                     query=request.query,
                     follow_ups=[],
-                    confidence=0
+                    confidence=0,
+                    repository_id=verified_repo_id,
+                    index_version=verified_active_version
                 )
             url = "https://router.huggingface.co/v1/chat/completions"
             headers = {
@@ -448,8 +464,8 @@ FOLLOW_UPS:
                 logger.error(f"HF Router Error: {res.text}")
                 final_answer = f"Cerebro link established! Snippets retrieved, but the AI router rejected the request (Status {res.status_code})."
         except Exception as api_e:
-            logger.error(f"HF Router Connection Error: {str(api_e)}")
-            final_answer = f"Cerebro link established! Snippets retrieved, but the server could not connect to the AI router. Error: {str(api_e)}"
+            logger.error(f"HF Router Connection Error: {type(api_e).__name__}")
+            final_answer = f"Cerebro link established! Snippets retrieved, but the server could not connect to the AI router."
 
         # Parse out follow-up questions
         answer_text = final_answer.strip()
@@ -483,7 +499,9 @@ FOLLOW_UPS:
             sources=sources,
             query=request.query,
             follow_ups=follow_ups[:3],
-            confidence=confidence
+            confidence=confidence,
+            repository_id=verified_repo_id,
+            index_version=verified_active_version
         )
 
     except Exception as e:

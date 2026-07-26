@@ -117,7 +117,8 @@ export default function Cerebro({ user }) {
   };
 
   const [userRepos, setUserRepos] = useState([]);
-  const [userRepoDetails, setUserRepoDetails] = useState([]);
+  const [userRepoObjects, setUserRepoObjects] = useState([]);
+  const [selectedRepoObj, setSelectedRepoObj] = useState(null);
   const [repoLoading, setRepoLoading] = useState(false);
 
   const fetchUserRepos = async () => {
@@ -126,20 +127,29 @@ export default function Cerebro({ user }) {
       const res = await apiFetch(`/user-repos?user_id=${user.id}`);
       if (!res.ok) {
         setUserRepos([]);
-        setUserRepoDetails([]);
+        setUserRepoObjects([]);
         return;
       }
       const data = await res.json();
-      setUserRepos(Array.isArray(data.repos) ? data.repos : []);
-      setUserRepoDetails(Array.isArray(data.repositories) ? data.repositories : []);
+      const stringRepos = Array.isArray(data.repos) ? data.repos : [];
+      const repoObjs = Array.isArray(data.repositories) ? data.repositories : [];
+      
+      setUserRepos(stringRepos);
+      setUserRepoObjects(repoObjs);
     } catch (err) {
       console.error('Failed to fetch repos:', err);
       setUserRepos([]);
-      setUserRepoDetails([]);
+      setUserRepoObjects([]);
     } finally {
       setRepoLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (user?.id) {
+      fetchUserRepos();
+    }
+  }, [user?.id]);
 
   const deleteRepo = async (repoName) => {
     if (!confirm(`Are you sure you want to delete ${repoName}? This cannot be undone.`)) return;
@@ -148,6 +158,7 @@ export default function Cerebro({ user }) {
       const res = await apiFetch(`/delete-repo?repo_name=${encodeURIComponent(repoName)}&user_id=${user.id}`, { method: 'POST' });
       if (res.ok) {
         setUserRepos(prev => (Array.isArray(prev) ? prev.filter(r => r !== repoName) : []));
+        setUserRepoObjects(prev => (Array.isArray(prev) ? prev.filter(r => (r.name || r.repo_name || r.repository_name) !== repoName) : []));
       }
     } catch (err) {
       alert('Failed to delete repository');
@@ -168,7 +179,7 @@ export default function Cerebro({ user }) {
       return {
         link: dbUrl,
         label: dbUrl.includes('github.com') ? 'GitHub' : 'External',
-        icon: <ExternalLink size={14} />
+        icon: <Github size={14} />
       };
     }
 
@@ -201,19 +212,29 @@ export default function Cerebro({ user }) {
     setResults(null);
 
     try {
-      const selectedRepoObj = (userRepoDetails || []).find(r => r.repo_name === repoFilter);
-      const selectedRepoId = selectedRepoObj ? selectedRepoObj.id : null;
+      const payload = { 
+        query: searchQuery, 
+        top_k: 4,
+        user_id: user.id,
+        history: chatContext
+      };
+
+      if (selectedRepoObj) {
+        payload.repository_id = selectedRepoObj.id;
+        payload.repo_filter = selectedRepoObj.name || selectedRepoObj.repository_name || selectedRepoObj.repo_name;
+      } else if (repoFilter) {
+        const matched = userRepoObjects.find(r => (r.name || r.repository_name || r.repo_name) === repoFilter);
+        if (matched) {
+          payload.repository_id = matched.id;
+          payload.repo_filter = matched.name || matched.repository_name || matched.repo_name;
+        } else {
+          payload.repo_filter = repoFilter;
+        }
+      }
 
       const response = await apiFetch('/search', {
         method: 'POST',
-        body: JSON.stringify({ 
-          query: searchQuery, 
-          top_k: 4,
-          user_id: user.id,
-          ...(repoFilter ? { repo_filter: repoFilter } : {}),
-          ...(selectedRepoId ? { repository_id: selectedRepoId } : {}),
-          history: chatContext
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
