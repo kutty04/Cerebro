@@ -464,10 +464,10 @@ FOLLOW_UPS:
                 if line.startswith('-'):
                     follow_ups.append(line.lstrip('- ').strip())
 
-        # Log analytics and save history
+        # Log analytics and save history with authenticated_user_id
         latency_ms = (time.time() - start_time) * 1000
-        log_search(request.query, repo_scope, confidence, latency_ms)
-        save_chat("default_thread", request.query, answer_text, sources)
+        log_search(request.query, repo_scope, confidence, latency_ms, user_id=authenticated_user_id)
+        save_chat("default_thread", request.query, answer_text, sources, user_id=authenticated_user_id)
         set_cached_query(
             query=request.query,
             user_id=authenticated_user_id,
@@ -487,16 +487,16 @@ FOLLOW_UPS:
         )
 
     except Exception as e:
-        logger.error(f"❌ Search failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+        logger.error(f"❌ Search failed: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {type(e).__name__}")
 
 @app.get("/analytics")
-async def fetch_analytics():
-    return get_analytics()
+async def fetch_analytics(authenticated_user_id: str = Depends(get_authenticated_user)):
+    return get_analytics(user_id=authenticated_user_id)
 
 @app.get("/history")
-async def fetch_history():
-    return get_chat_history()
+async def fetch_history(authenticated_user_id: str = Depends(get_authenticated_user)):
+    return get_chat_history(user_id=authenticated_user_id)
 
 
 # Indexing endpoint (for manual uploads)
@@ -507,22 +507,29 @@ async def index_snippet(
     language: str,
     code_content: str,
     source_url: Optional[str] = None,
+    user_id: Optional[str] = None,
+    authenticated_user_id: str = Depends(get_authenticated_user)
 ):
     """
-    Manually add a code snippet to the index
+    Manually add a code snippet to the index for verified authenticated_user_id
     """
+    if user_id and user_id != authenticated_user_id:
+        raise HTTPException(status_code=403, detail="User context mismatch: user_id parameter does not match authenticated identity.")
+
+    target_user_id = authenticated_user_id
     if not embedder or not db:
         raise HTTPException(status_code=500, detail="System not initialized")
 
     try:
-        logger.info(f"📝 Indexing {repo_name}/{file_path}")
+        logger.info("📝 Indexing snippet for verified user")
 
         # Generate embedding
         embedding = embedder.encode(code_content).tolist()
 
-        # Store in Supabase
+        # Store in Supabase bound to target_user_id
         result = db.table("code_snippets").insert(
             {
+                "user_id": target_user_id,
                 "repo_name": repo_name,
                 "file_path": file_path,
                 "language": language,
@@ -532,37 +539,42 @@ async def index_snippet(
             }
         ).execute()
 
-        logger.info(f"✅ Successfully indexed {file_path}")
+        logger.info("✅ Successfully indexed snippet")
         return {"status": "success", "snippet_id": result.data[0]["id"]}
 
     except Exception as e:
-        logger.error(f"❌ Indexing failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Indexing failed: {str(e)}")
+        logger.error(f"❌ Indexing failed: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail=f"Indexing failed: {type(e).__name__}")
 
 
 @app.post("/ingest")
-async def ingest_repo(request: IngestRequest):
+async def ingest_repo(
+    request: IngestRequest,
+    authenticated_user_id: str = Depends(get_authenticated_user)
+):
     """
-    Clone a GitHub repo, index it for a specific user, and clean up.
+    Clone a GitHub repo, index it for authenticated_user_id, and clean up.
     """
+    if request.user_id and request.user_id != authenticated_user_id:
+        raise HTTPException(status_code=403, detail="User context mismatch: body user_id does not match authenticated identity.")
+
+    target_user_id = authenticated_user_id
     temp_dir = tempfile.mkdtemp()
     try:
-        logger.info(f"🚀 Ingesting repo: {request.repo_url} for user: {request.user_id}")
+        logger.info("🚀 Ingesting repo for verified user")
         
         # 1. Clone the repo
         git.Repo.clone_from(request.repo_url, temp_dir, depth=1)
         
-        # Extract repo name from URL (e.g., https://github.com/user/repo.git -> repo)
+        # Extract repo name from URL
         repo_name = request.repo_url.rstrip("/").split("/")[-1].replace(".git", "")
         
         # 2. Initialize Indexer
-        # We pass temp_dir as the repos_path. 
-        # CodeIndexer.scan_repos will treat temp_dir as the root.
         indexer = CodeIndexer(repos_path=temp_dir, repo_url=request.repo_url, repo_name=repo_name)
         if not indexer.initialize():
             raise HTTPException(status_code=500, detail="Indexer initialization failed")
         
-        indexer.user_id = request.user_id
+        indexer.user_id = target_user_id
         
         # 3. Run Indexing
         snippets = indexer.scan_repos()
@@ -573,13 +585,13 @@ async def ingest_repo(request: IngestRequest):
         
         return {
             "status": "success", 
-            "message": f"Successfully indexed {len(snippets)} snippets from {request.repo_url}",
+            "message": f"Successfully indexed {len(snippets)} snippets",
             "indexed_count": len(snippets)
         }
         
     except Exception as e:
-        logger.error(f"❌ Ingestion failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+        logger.error(f"❌ Ingestion failed: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {type(e).__name__}")
     finally:
         # 4. Cleanup with Force (Handles read-only files in .git on Windows)
         def onerror(func, path, exc_info):
