@@ -7,8 +7,8 @@ from telemetry import init_db, log_search, save_chat, get_analytics, get_chat_hi
 
 client = TestClient(app)
 
-USER_A = "11111111-1111-1111-1111-111111111111"
-USER_B = "22222222-2222-2222-2222-222222222222"
+USER_A = "11111111-1111-4111-a111-111111111111"
+USER_B = "22222222-2222-4222-a222-222222222222"
 
 
 def mock_supabase_auth_get_user(token: str):

@@ -406,9 +406,10 @@ CODE CONTEXT:
 
 RULES:
 1. Use ONLY the code context provided above. Do not use outside knowledge or hallucinate.
-2. Grounding & Scope:
-   - When asked a broad question about a repository as a whole (e.g. "What is the concept of this project?"), understand the structure from all retrieved snippets.
-   - If the repository is a portfolio or multi-project workspace (e.g. `Jarvis-portfolio`), identify it accurately as a personal developer portfolio showcasing projects (such as a bus crowding tracker or other components inside it). Do NOT describe a single subproject as the entire repository concept.
+2. Grounding & Scope Analysis:
+   - Base your understanding of the repository structure solely on the retrieved snippets.
+   - When asked a broad question about a repository as a whole (e.g. "What is the concept of this project?"), analyze all retrieved code snippets across the repository.
+   - If the retrieved evidence indicates a developer portfolio, multi-component workspace, or project repository containing sub-modules, describe it accurately as a portfolio/workspace showcasing those projects. Do NOT mistake a single sub-module or sub-project for the concept of the entire repository.
 3. If the answer or a closely related concept is in the code, explain it and cite the exact file path and function name.
 4. If the context is completely unrelated and contains no useful information, explicitly say "I couldn't find this in the retrieved codebase snippets."
 5. Keep your answer concise and include a brief code example if relevant.

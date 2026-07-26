@@ -220,15 +220,18 @@ export default function Cerebro({ user }) {
       };
 
       if (selectedRepoObj) {
+        if (!selectedRepoObj.id) {
+          throw new Error('Selected repository is missing a valid repository_id UUID.');
+        }
         payload.repository_id = selectedRepoObj.id;
         payload.repo_filter = selectedRepoObj.name || selectedRepoObj.repository_name || selectedRepoObj.repo_name;
       } else if (repoFilter) {
         const matched = userRepoObjects.find(r => (r.name || r.repository_name || r.repo_name) === repoFilter);
-        if (matched) {
+        if (matched && matched.id) {
           payload.repository_id = matched.id;
           payload.repo_filter = matched.name || matched.repository_name || matched.repo_name;
         } else {
-          payload.repo_filter = repoFilter;
+          throw new Error('Selected repository is missing a valid repository_id UUID.');
         }
       }
 

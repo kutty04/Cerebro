@@ -1,4 +1,5 @@
 import pytest
+import uuid
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock, patch
 
@@ -7,13 +8,17 @@ from fastapi import HTTPException
 
 client = TestClient(app)
 
-# Fixtures for multi-tenant and multi-repo tests
-USER_A_ID = "11111111-1111-1111-1111-111111111111"
-USER_B_ID = "22222222-2222-2222-2222-222222222222"
+# Fixtures with RFC4122 UUID compliance
+USER_A_ID = "11111111-1111-4111-a111-111111111111"
+USER_B_ID = "22222222-2222-4222-a222-222222222222"
 
-JARVIS_REPO_ID = "repo-jarvis-aaaa-aaaa-aaaaaaaaaaaa"
-BUS_REPO_ID = "repo-bus-bbbb-bbbb-bbbbbbbbbbbb"
-USER_B_REPO_ID = "repo-userb-cccc-cccc-cccccccccccc"
+JARVIS_REPO_ID = "a1a1a1a1-aaaa-4aaa-a1a1-a1a1a1a1a1a1"
+BUS_REPO_ID = "b2b2b2b2-bbbb-4bbb-b2b2-b2b2b2b2b2b2"
+USER_B_REPO_ID = "c3c3c3c3-cccc-4ccc-c3c3-c3c3c3c3c3c3"
+
+# Verify test UUIDs are valid RFC4122 UUIDs
+for u_str in [USER_A_ID, USER_B_ID, JARVIS_REPO_ID, BUS_REPO_ID, USER_B_REPO_ID]:
+    uuid.UUID(u_str)
 
 MOCK_REPOSITORIES_DB = [
     {
@@ -153,6 +158,15 @@ class MockSupabaseRPC:
         self.rpc_name = rpc_name
         self.params = params
 
+        # Verify RPC params pass valid UUID strings when supplied
+        p_user = params.get("p_user_id")
+        if p_user:
+            uuid.UUID(str(p_user))
+
+        p_repo = params.get("p_repository_id")
+        if p_repo:
+            uuid.UUID(str(p_repo))
+
     def execute(self):
         user_id = self.params.get("p_user_id")
         repo_id = self.params.get("p_repository_id")
@@ -255,7 +269,7 @@ class TestRepositoryScopeIntegrity:
         assert response.status_code == 400
         assert "Invalid or unauthorized repository selection" in response.json()["detail"]
 
-    def test_invalid_repository_id_does_not_fall_back_to_all_repos(self, mock_embed):
+    def test_invalid_non_uuid_repository_id_returns_400(self, mock_embed):
         response = client.post(
             "/search",
             headers={"Authorization": f"Bearer {USER_A_ID}"},

@@ -6,8 +6,8 @@ from telemetry import get_cache_key, get_cached_query, set_cached_query
 
 client = TestClient(app)
 
-USER_A_ID = "11111111-1111-1111-1111-111111111111"
-USER_B_ID = "22222222-2222-2222-2222-222222222222"
+USER_A_ID = "11111111-1111-4111-a111-111111111111"
+USER_B_ID = "22222222-2222-4222-a222-222222222222"
 QUERY = "What is the entrypoint of this project?"
 
 
@@ -169,14 +169,14 @@ class TestCacheKeyLogic:
         assert len(key_a) == 64  # SHA-256 hex string
 
     def test_cache_keys_are_unique_per_repository_scope(self):
-        key_jarvis = get_cache_key(query=QUERY, user_id=USER_A_ID, repo_scope="Jarvis-portfolio", index_version="v1")
-        key_bus = get_cache_key(query=QUERY, user_id=USER_A_ID, repo_scope="bus-crowding", index_version="v1")
+        key_jarvis = get_cache_key(query=QUERY, user_id=USER_A_ID, repo_scope="a1a1a1a1-aaaa-4aaa-a1a1-a1a1a1a1a1a1", index_version="v1")
+        key_bus = get_cache_key(query=QUERY, user_id=USER_A_ID, repo_scope="b2b2b2b2-bbbb-4bbb-b2b2-b2b2b2b2b2b2", index_version="v1")
         key_all = get_cache_key(query=QUERY, user_id=USER_A_ID, repo_scope="ALL", index_version="v1")
 
         assert len({key_jarvis, key_bus, key_all}) == 3
 
     def test_cache_keys_are_unique_per_index_version(self):
-        key_v1 = get_cache_key(query=QUERY, user_id=USER_A_ID, repo_scope="Jarvis-portfolio", index_version="v1")
-        key_v2 = get_cache_key(query=QUERY, user_id=USER_A_ID, repo_scope="Jarvis-portfolio", index_version="v2")
+        key_v1 = get_cache_key(query=QUERY, user_id=USER_A_ID, repo_scope="a1a1a1a1-aaaa-4aaa-a1a1-a1a1a1a1a1a1", index_version="v1")
+        key_v2 = get_cache_key(query=QUERY, user_id=USER_A_ID, repo_scope="a1a1a1a1-aaaa-4aaa-a1a1-a1a1a1a1a1a1", index_version="v2")
 
         assert key_v1 != key_v2
