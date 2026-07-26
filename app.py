@@ -206,43 +206,48 @@ def validate_repository_ownership(user_id: str, repository_id: Optional[str] = N
     """
     Validates that the supplied repository_id or repo_name belongs strictly to user_id.
     Returns (verified_repo_id, verified_repo_name, verified_active_version).
-    If invalid or cross-user, raises HTTPException 400.
+    repository_id path: checks user_repositories then code_snippets (real UUID only).
+    repo_name-only path: only resolves via user_repositories; legacy repos without a row
+    must be reconciled via POST /repositories/reconcile-legacy before scoped search is allowed.
+    Raises HTTPException 400 if the repository cannot be verified.
     """
     if not repository_id and not repo_name:
         return None, None, None
 
     if repository_id:
-        # Check user_repositories by ID & user_id
-        res = db.table("user_repositories").select("id, repository_name, repo_name, active_index_version").eq("id", repository_id).eq("user_id", user_id).execute()
-        if res.data and len(res.data) > 0:
-            row = res.data[0]
-            name = row.get("repository_name") or row.get("repo_name")
-            ver = row.get("active_index_version") or "v1"
-            return str(row["id"]), name, ver
-        
-        # Check code_snippets by repository_id & user_id
-        res2 = db.table("code_snippets").select("repository_id, repo_name, index_version").eq("repository_id", repository_id).eq("user_id", user_id).limit(1).execute()
-        if res2.data and len(res2.data) > 0:
-            row = res2.data[0]
-            return str(row.get("repository_id")), row.get("repo_name"), row.get("index_version") or "v1"
-            
-        raise HTTPException(status_code=400, detail="Invalid or unauthorized repository selection.")
+        # 1. Check user_repositories first (authoritative source)
+        try:
+            res = db.table("user_repositories").select("id, repository_name, repo_name, active_index_version").eq("id", repository_id).eq("user_id", user_id).execute()
+            if res.data and len(res.data) > 0:
+                row = res.data[0]
+                name = row.get("repository_name") or row.get("repo_name")
+                ver = row.get("active_index_version") or "v1"
+                return str(row["id"]), name, ver
+        except Exception:
+            pass
+
+        # 2. Fall back to code_snippets for repos not yet in user_repositories but with real UUID
+        try:
+            res2 = db.table("code_snippets").select("repository_id, repo_name, index_version").eq("repository_id", repository_id).eq("user_id", user_id).limit(1).execute()
+            if res2.data and len(res2.data) > 0:
+                row = res2.data[0]
+                return str(row.get("repository_id")), row.get("repo_name"), row.get("index_version") or "v1"
+        except Exception:
+            pass
 
     if repo_name:
-        # Check user_repositories by name & user_id
-        res = db.table("user_repositories").select("id, repository_name, repo_name, active_index_version").eq("user_id", user_id).or_(f"repository_name.eq.{repo_name},repo_name.eq.{repo_name}").execute()
-        if res.data and len(res.data) > 0:
-            row = res.data[0]
-            return str(row["id"]), repo_name, row.get("active_index_version") or "v1"
+        # Only resolve via user_repositories. Legacy repos with no real user_repositories row
+        # must first be reconciled via POST /repositories/reconcile-legacy.
+        try:
+            res = db.table("user_repositories").select("id, repository_name, repo_name, active_index_version").eq("user_id", user_id).or_(f"repository_name.eq.{repo_name},repo_name.eq.{repo_name}").execute()
+            if res.data and len(res.data) > 0:
+                row = res.data[0]
+                return str(row["id"]), repo_name, row.get("active_index_version") or "v1"
+        except Exception:
+            pass
 
-        res2 = db.table("code_snippets").select("repository_id, repo_name, index_version").eq("repo_name", repo_name).eq("user_id", user_id).limit(1).execute()
-        if res2.data and len(res2.data) > 0:
-            row = res2.data[0]
-            return str(row.get("repository_id") or repo_name), repo_name, row.get("index_version") or "v1"
+    raise HTTPException(status_code=400, detail="Invalid or unauthorized repository selection.")
 
-        raise HTTPException(status_code=400, detail="Invalid or unauthorized repository selection.")
-
-    return None, None, None
 
 
 @app.post("/search", response_model=SearchResponse)
@@ -634,6 +639,26 @@ async def ingest_repo(
              
         indexer.index_snippets(snippets)
         
+        # Upsert/Ensure user_repositories record exists for authenticated user
+        try:
+            existing = db.table("user_repositories").select("id").eq("user_id", target_user_id).or_(f"repository_name.eq.{repo_name},repo_name.eq.{repo_name}").execute()
+            if not existing.data:
+                db.table("user_repositories").insert({
+                    "user_id": target_user_id,
+                    "repository_name": repo_name,
+                    "repo_name": repo_name,
+                    "canonical_url": request.repo_url,
+                    "status": "active",
+                    "active_index_version": "v1"
+                }).execute()
+            else:
+                db.table("user_repositories").update({
+                    "canonical_url": request.repo_url,
+                    "status": "active"
+                }).eq("id", existing.data[0]["id"]).execute()
+        except Exception as repo_rec_e:
+            logger.warning(f"⚠️ user_repositories record sync notice: {repo_rec_e}")
+
         return {
             "status": "success", 
             "message": f"Successfully indexed {len(snippets)} snippets",
@@ -668,8 +693,10 @@ async def get_user_repos(
     authenticated_user_id: str = Depends(get_authenticated_user)
 ):
     """
-    Fetch authoritative repository list for this user from user_repositories.
-    Falls back gracefully to code_snippets if user_repositories table is unpopulated.
+    Read-only. Fetches the authenticated user's complete repository list by merging
+    user_repositories (authoritative, real UUIDs) with distinct repositories found in
+    code_snippets. Legacy snippet-only repositories appear with id=null and legacy=true.
+    This endpoint performs zero inserts, updates, or deletes.
     """
     if user_id and user_id != authenticated_user_id:
         raise HTTPException(status_code=403, detail="User context mismatch: user_id parameter does not match authenticated identity.")
@@ -677,54 +704,153 @@ async def get_user_repos(
     target_user_id = authenticated_user_id
     if not db:
         raise HTTPException(status_code=500, detail="Database not connected")
-    
+
     try:
-        # 1. Authoritative lookup from user_repositories
+        # 1. Primary source: user_repositories (real UUIDs, authoritative)
         res_repos = db.table("user_repositories").select(
             "id, repository_name, repo_name, canonical_url, active_index_version, status"
         ).eq("user_id", target_user_id).execute()
-
         repos_data = res_repos.data or []
-        if repos_data:
-            repositories = []
-            repos_names = []
-            for r in repos_data:
-                name = r.get("repository_name") or r.get("repo_name")
-                if not name:
-                    continue
-                repos_names.append(name)
-                repositories.append({
-                    "id": str(r.get("id")),
-                    "repository_name": name,
-                    "repo_name": name,
-                    "canonical_url": r.get("canonical_url", ""),
-                    "active_index_version": r.get("active_index_version", "v1"),
-                    "status": r.get("status", "ready")
-                })
-            repos = sorted(list(set(repos_names)))
-            return {"repos": repos, "repositories": repositories}
 
-        # Fallback to code_snippets if user_repositories empty
-        result = db.table("code_snippets").select("repo_name, repository_id").eq("user_id", target_user_id).execute()
-        repo_map = {}
-        for r in (result.data or []):
-            name = r.get("repo_name")
-            r_id = r.get("repository_id")
-            if name and name not in repo_map:
-                repo_map[name] = {
-                    "id": str(r_id or name),
+        # 2. Secondary source: code_snippets (may include legacy repos not yet in user_repositories)
+        res_snippets = db.table("code_snippets").select(
+            "repo_name, repository_id, index_version"
+        ).eq("user_id", target_user_id).execute()
+        snippets_data = res_snippets.data or []
+
+        repo_by_name: dict = {}
+
+        # Add known repositories from user_repositories first (these have real UUIDs)
+        for r in repos_data:
+            r_id = str(r.get("id")) if r.get("id") else None
+            name = r.get("repository_name") or r.get("repo_name")
+            if not name or not r_id:
+                continue
+            norm_name = name.strip().lower()
+            repo_by_name[norm_name] = {
+                "id": r_id,
+                "repository_name": name,
+                "repo_name": name,
+                "canonical_url": r.get("canonical_url", ""),
+                "active_index_version": r.get("active_index_version", "v1"),
+                "status": r.get("status", "active"),
+                "legacy": False
+            }
+
+        # Merge snippet-only repositories as legacy entries (id=null, legacy=true)
+        # No writes are performed here.
+        for s in snippets_data:
+            name = s.get("repo_name")
+            if not name:
+                continue
+            norm_name = name.strip().lower()
+            if norm_name in repo_by_name:
+                # Already tracked in user_repositories — skip
+                continue
+            # Legacy entry: exists only in code_snippets, no real user_repositories row yet
+            repo_by_name[norm_name] = {
+                "id": None,
+                "repository_name": name,
+                "repo_name": name,
+                "canonical_url": "",
+                "active_index_version": s.get("index_version") or "v1",
+                "status": "legacy",
+                "legacy": True
+            }
+
+        all_objs = list(repo_by_name.values())
+        all_names = sorted(list(set(r["repo_name"] for r in all_objs)))
+        return {"repos": all_names, "repositories": all_objs}
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch user repos: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/repositories/reconcile-legacy")
+async def reconcile_legacy_repositories(
+    user_id: Optional[str] = None,
+    authenticated_user_id: str = Depends(get_authenticated_user)
+):
+    """
+    Explicit action: Creates real user_repositories records for the authenticated user's
+    legacy snippet-only repositories (those present in code_snippets but not in
+    user_repositories). Also backfills repository_id on code_snippets with the new UUID.
+    Must only be called through an explicit user action/confirmation, never during page load.
+    Returns a list of repositories that were reconciled.
+    """
+    if user_id and user_id != authenticated_user_id:
+        raise HTTPException(status_code=403, detail="User context mismatch: user_id parameter does not match authenticated identity.")
+
+    target_user_id = authenticated_user_id
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not connected")
+
+    reconciled = []
+    errors = []
+
+    try:
+        # Read user_repositories (real UUID rows)
+        res_repos = db.table("user_repositories").select(
+            "id, repository_name, repo_name"
+        ).eq("user_id", target_user_id).execute()
+        known_names = set()
+        for r in (res_repos.data or []):
+            name = r.get("repository_name") or r.get("repo_name")
+            if name:
+                known_names.add(name.strip().lower())
+
+        # Find snippet-only repositories not yet in user_repositories
+        res_snippets = db.table("code_snippets").select(
+            "repo_name, index_version"
+        ).eq("user_id", target_user_id).execute()
+
+        seen_legacy: set = set()
+        for s in (res_snippets.data or []):
+            name = s.get("repo_name")
+            if not name:
+                continue
+            norm_name = name.strip().lower()
+            if norm_name in known_names or norm_name in seen_legacy:
+                continue
+            seen_legacy.add(norm_name)
+
+            try:
+                ins_res = db.table("user_repositories").insert({
+                    "user_id": target_user_id,
                     "repository_name": name,
                     "repo_name": name,
                     "canonical_url": "",
-                    "active_index_version": "v1",
-                    "status": "ready"
-                }
+                    "status": "active",
+                    "active_index_version": s.get("index_version") or "v1"
+                }).execute()
 
-        repos = sorted(list(repo_map.keys()))
-        repositories = list(repo_map.values())
-        return {"repos": repos, "repositories": repositories}
+                if ins_res.data and len(ins_res.data) > 0:
+                    new_r = ins_res.data[0]
+                    new_id = str(new_r["id"])
+
+                    # Backfill real UUID onto matching code_snippets
+                    try:
+                        db.table("code_snippets").update(
+                            {"repository_id": new_id}
+                        ).eq("user_id", target_user_id).eq("repo_name", name).execute()
+                    except Exception as bf_err:
+                        logger.warning(f"⚠️ Backfill notice for {name}: {bf_err}")
+
+                    reconciled.append({"repo_name": name, "id": new_id})
+                    known_names.add(norm_name)
+                else:
+                    errors.append({"repo_name": name, "error": "Insert returned no data"})
+            except Exception as ins_err:
+                logger.error(f"❌ Reconcile failed for {name}: {ins_err}")
+                errors.append({"repo_name": name, "error": str(ins_err)})
+
+        return {
+            "status": "ok",
+            "reconciled": reconciled,
+            "errors": errors
+        }
     except Exception as e:
-        logger.error(f"❌ Failed to fetch user repos: {str(e)}")
+        logger.error(f"❌ Legacy reconciliation failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -735,7 +861,7 @@ async def delete_repo(
     authenticated_user_id: str = Depends(get_authenticated_user)
 ):
     """
-    Delete all snippets associated with a repository for a user.
+    Delete all snippets and repository records associated with a repository for a user.
     """
     if user_id and user_id != authenticated_user_id:
         raise HTTPException(status_code=403, detail="User context mismatch: user_id parameter does not match authenticated identity.")
@@ -743,6 +869,10 @@ async def delete_repo(
     target_user_id = authenticated_user_id
     try:
         db.table("code_snippets").delete().eq("repo_name", repo_name).eq("user_id", target_user_id).execute()
+        try:
+            db.table("user_repositories").delete().or_(f"repository_name.eq.{repo_name},repo_name.eq.{repo_name}").eq("user_id", target_user_id).execute()
+        except Exception:
+            pass
         return {"status": "success", "message": f"Repository {repo_name} deleted"}
     except Exception as e:
         logger.error(f"❌ Failed to delete repo: {str(e)}")
@@ -772,10 +902,22 @@ async def get_graph_data(
 
         query = db.table("code_snippets").select("repo_name, file_path, repository_id").eq("user_id", target_user_id)
         if verified_repo_id:
-            query = query.eq("repository_id", verified_repo_id)
+            try:
+                res_check = db.table("code_snippets").select("id").eq("user_id", target_user_id).eq("repository_id", verified_repo_id).limit(1).execute()
+                if res_check.data and len(res_check.data) > 0:
+                    query = query.eq("repository_id", verified_repo_id)
+                elif verified_repo_name:
+                    query = query.eq("repo_name", verified_repo_name)
+                else:
+                    query = query.eq("repository_id", verified_repo_id)
+            except Exception:
+                if verified_repo_name:
+                    query = query.eq("repo_name", verified_repo_name)
+                else:
+                    query = query.eq("repository_id", verified_repo_id)
         elif verified_repo_name:
             query = query.eq("repo_name", verified_repo_name)
-            
+
         result = query.execute()
         
         nodes = []
