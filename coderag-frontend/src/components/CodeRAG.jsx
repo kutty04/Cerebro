@@ -94,6 +94,7 @@ export default function Cerebro({ user }) {
         logs: []
       });
       setIngestUrl('');
+      fetchUserRepos();
       setTimeout(() => setShowIngestModal(false), 3000);
     } catch (err) {
       setIngestStatus({ loading: false, error: err.message || 'Ingestion failed', success: '', logs: [] });
@@ -120,8 +121,6 @@ export default function Cerebro({ user }) {
   const [userRepoObjects, setUserRepoObjects] = useState([]);
   const [selectedRepoObj, setSelectedRepoObj] = useState(null);
   const [repoLoading, setRepoLoading] = useState(false);
-  const [repairLoading, setRepairLoading] = useState(false);
-  const [repairMessage, setRepairMessage] = useState('');
 
   const fetchUserRepos = async () => {
     setRepoLoading(true);
@@ -152,28 +151,6 @@ export default function Cerebro({ user }) {
       fetchUserRepos();
     }
   }, [user?.id]);
-
-  const repairLegacyRepos = async () => {
-    setRepairLoading(true);
-    setRepairMessage('');
-    try {
-      const res = await apiFetch('/repositories/reconcile-legacy', { method: 'POST' });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || 'Repair failed');
-      }
-      await fetchUserRepos();
-      setRepairMessage('Legacy repositories repaired. You can now select and search them.');
-    } catch (err) {
-      setRepairMessage(
-        err.message && err.message.includes('session')
-          ? 'Your session has expired. Please sign in again.'
-          : 'Repair failed. Please try again.'
-      );
-    } finally {
-      setRepairLoading(false);
-    }
-  };
 
   const deleteRepo = async (repoName) => {
     if (!confirm(`Are you sure you want to delete ${repoName}? This cannot be undone.`)) return;
@@ -348,27 +325,6 @@ export default function Cerebro({ user }) {
               <p>Repositories currently indexed in your neural profile.</p>
             </div>
 
-            {(userRepoObjects || []).some(r => r.legacy === true) && (
-              <div style={{ marginBottom: '1.2rem', display: 'flex', flexDirection: 'column', gap: '0.6rem', alignItems: 'flex-start' }}>
-                <button
-                  id="repair-legacy-btn"
-                  onClick={repairLegacyRepos}
-                  disabled={repairLoading}
-                  className="ingest-submit-btn"
-                  style={{ width: 'auto', padding: '0.6rem 1.6rem', fontSize: '0.9rem' }}
-                >
-                  {repairLoading ? <Activity className="spin" size={14} /> : null}
-                  {repairLoading ? '\u00a0Repairing...' : 'Repair legacy repositories'}
-                </button>
-                {repairMessage && (
-                  <div className={repairMessage.includes('repaired') ? 'status-badge' : 'error-message'}
-                    style={{ fontSize: '0.85rem', padding: '0.4rem 0.8rem' }}>
-                    {repairMessage}
-                  </div>
-                )}
-              </div>
-            )}
-
             {repoLoading ? (
               <div className="loading-state">
                 <Activity className="spin" /> Scanning Vault...
@@ -383,10 +339,7 @@ export default function Cerebro({ user }) {
                     </div>
                     <h3>{repo}</h3>
                     <div className="repo-meta">
-                      {(userRepoObjects || []).find(r => r.repo_name === repo || r.repository_name === repo)?.legacy
-                        ? <span className="status-badge" style={{ opacity: 0.7 }}>Legacy</span>
-                        : <span className="status-badge">Indexed</span>
-                      }
+                      <span className="status-badge">Indexed</span>
                     </div>
                   </div>
                 ))}
@@ -430,7 +383,13 @@ export default function Cerebro({ user }) {
               </div>
               <select 
                 value={repoFilter} 
-                onChange={(e) => setRepoFilter(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setRepoFilter(val);
+                  const matched = (userRepoObjects || []).find(r => (r.name || r.repository_name || r.repo_name) === val);
+                  setSelectedRepoObj(matched || null);
+                  setError('');
+                }}
                 className="repo-select"
               >
                 <option value="">All Projects</option>

@@ -141,47 +141,13 @@ class MockSupabaseQuery:
     def update(self, data):
         self._is_update = True
         self._update_data = data
-        dataset = MOCK_REPOSITORIES_DB if self.table_name == "user_repositories" else MOCK_SNIPPETS_DB
-        for r in dataset:
-            match = all(
-                str(r.get(f['col'])) == str(f['val'])
-                for f in self.filters if f['op'] == 'eq'
-            )
-            if match:
-                r.update(data)
         return self
 
     def delete(self):
         self._is_delete = True
-        dataset = MOCK_REPOSITORIES_DB if self.table_name == "user_repositories" else MOCK_SNIPPETS_DB
-        keep = [
-            r for r in dataset
-            if not all(
-                str(r.get(f['col'])) == str(f['val'])
-                for f in self.filters if f['op'] == 'eq'
-            )
-        ]
-        if self.table_name == "user_repositories":
-            MOCK_REPOSITORIES_DB[:] = keep
-        else:
-            MOCK_SNIPPETS_DB[:] = keep
         return self
 
-    def execute(self):
-        res = MagicMock()
-
-        # INSERT: return the newly created record
-        if self._inserted is not None:
-            res.data = [self._inserted]
-            return res
-
-        # UPDATE / DELETE: already applied in-place, return empty success
-        if self._is_update or self._is_delete:
-            res.data = []
-            return res
-
-        # SELECT
-        dataset = MOCK_REPOSITORIES_DB if self.table_name == "user_repositories" else MOCK_SNIPPETS_DB
+    def _apply_filters(self, dataset):
         results = list(dataset)
         for f in self.filters:
             if f['op'] == 'eq':
@@ -200,6 +166,38 @@ class MockSupabaseQuery:
                 results = matched
         if self.limit_val is not None:
             results = results[:self.limit_val]
+        return results
+
+    def execute(self):
+        res = MagicMock()
+
+        # INSERT: return the newly created record
+        if self._inserted is not None:
+            res.data = [self._inserted]
+            return res
+
+        # UPDATE: apply updates to dataset matching filters
+        if self._is_update:
+            dataset = MOCK_REPOSITORIES_DB if self.table_name == "user_repositories" else MOCK_SNIPPETS_DB
+            matched = self._apply_filters(dataset)
+            for r in matched:
+                r.update(self._update_data)
+            res.data = matched
+            return res
+
+        # DELETE: remove items matching filters from dataset
+        if self._is_delete:
+            dataset = MOCK_REPOSITORIES_DB if self.table_name == "user_repositories" else MOCK_SNIPPETS_DB
+            matched = self._apply_filters(dataset)
+            for r in matched:
+                if r in dataset:
+                    dataset.remove(r)
+            res.data = []
+            return res
+
+        # SELECT
+        dataset = MOCK_REPOSITORIES_DB if self.table_name == "user_repositories" else MOCK_SNIPPETS_DB
+        results = self._apply_filters(dataset)
         res.data = results
         return res
 
@@ -395,89 +393,208 @@ class TestRepositoryScopeIntegrity:
         assert update_calls == [], f"GET /user-repos performed unexpected updates: {update_calls}"
         assert delete_calls == [], f"GET /user-repos performed unexpected deletes: {delete_calls}"
 
-    def test_legacy_snippet_only_repo_appears_with_null_id_and_legacy_flag(self, mock_embed):
-        """IPL is snippet-only (no user_repositories row): must appear as legacy=True, id=None."""
-        # Add IPL snippet that has no corresponding user_repositories row
+    def test_user_repos_queries_only_user_repositories_ignoring_orphans(self, mock_embed):
+        """GET /user-repos is read-only and returns ONLY user_repositories rows. Orphan snippets are ignored."""
+        # Add an orphan snippet for User A that has no user_repositories record
         MOCK_SNIPPETS_DB.append({
-            "id": "s_ipl_legacy",
+            "id": "s_orphan_link_shortner",
             "user_id": USER_A_ID,
             "repository_id": None,
-            "repo_name": "ipl",
-            "file_path": "ipl.py",
-            "code_content": "# ipl code",
+            "repo_name": "link-shortner",
+            "file_path": "index.js",
+            "code_content": "console.log('orphan');",
+            "source_url": None,
             "index_version": "v1"
         })
 
-        response = client.get(
+        resp = client.get(
             f"/user-repos?user_id={USER_A_ID}",
             headers={"Authorization": f"Bearer {USER_A_ID}"}
         )
+        assert resp.status_code == 200
+        data = resp.json()
 
-        assert response.status_code == 200
-        data = response.json()
-        assert "ipl" in data["repos"]
+        # Link shortner orphan snippet must NOT appear in user-repos
+        repo_names = data["repos"]
+        assert "link-shortner" not in repo_names
+        # Authoritative repos from user_repositories MUST appear with real UUIDs
+        assert "Jarvis-portfolio" in repo_names
+        assert "bus-crowding" in repo_names
+        for r in data["repositories"]:
+            assert r["id"] is not None
+            assert r["legacy"] is False
 
-        ipl_entry = next((r for r in data["repositories"] if r["repo_name"] == "ipl"), None)
-        assert ipl_entry is not None, "ipl must appear in repositories list"
-        assert ipl_entry["id"] is None, "Legacy repo must have id=None, not a fake string"
-        assert ipl_entry["legacy"] is True, "Legacy repo must have legacy=True"
+    def test_ingest_github_url_derives_metadata_and_registers_uuid(self, mock_embed):
+        """POST /ingest parses GitHub URL, registers user_repositories record with UUID, and indexes snippets with UUID."""
+        # Clean any existing IPL records
+        global MOCK_REPOSITORIES_DB, MOCK_SNIPPETS_DB
+        MOCK_REPOSITORIES_DB = [r for r in MOCK_REPOSITORIES_DB if r.get("repo_name") != "ipl"]
+        MOCK_SNIPPETS_DB = [s for s in MOCK_SNIPPETS_DB if s.get("repo_name") != "ipl"]
 
-    def test_reconcile_legacy_creates_real_uuid_record_for_authenticated_user_only(self, mock_embed):
-        """POST /repositories/reconcile-legacy creates real user_repositories rows for legacy repos."""
-        # Ensure ipl snippet exists without a user_repositories row
-        ipl_name_in_repos = any(r["repo_name"] == "ipl" for r in MOCK_REPOSITORIES_DB if r.get("user_id") == USER_A_ID)
-        if not ipl_name_in_repos:
-            # Only add the snippet if it doesn't exist yet
-            if not any(s.get("repo_name") == "ipl" and s.get("user_id") == USER_A_ID for s in MOCK_SNIPPETS_DB):
-                MOCK_SNIPPETS_DB.append({
-                    "id": "s_ipl_reconcile",
-                    "user_id": USER_A_ID,
-                    "repository_id": None,
+        # Mock indexer methods to simulate scanning 5 snippets
+        with patch("app.CodeIndexer.scan_repos") as mock_scan, \
+             patch("app.CodeIndexer.index_snippets") as mock_index:
+            
+            mock_scan.return_value = [
+                {
                     "repo_name": "ipl",
-                    "file_path": "ipl.py",
-                    "code_content": "# ipl",
-                    "index_version": "v1"
-                })
+                    "file_path": "main.py",
+                    "language": "python",
+                    "code_content": "def ipl_entrypoint(): print('IPL Match')",
+                    "source_url": "https://github.com/kutty04/ipl/blob/main/main.py",
+                    "start_line": 1
+                }
+            ]
 
-        initial_repo_count = len([r for r in MOCK_REPOSITORIES_DB if r.get("user_id") == USER_A_ID])
+            resp = client.post(
+                "/ingest",
+                headers={"Authorization": f"Bearer {USER_A_ID}"},
+                json={
+                    "repo_url": "https://github.com/kutty04/ipl.git",
+                    "user_id": USER_A_ID
+                }
+            )
 
-        response = client.post(
-            "/repositories/reconcile-legacy",
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "success"
+            real_uuid = data["repository_id"]
+            assert real_uuid is not None
+            uuid.UUID(real_uuid)
+
+            # Verify record created in user_repositories with all required metadata
+            ipl_row = next((r for r in MOCK_REPOSITORIES_DB if r.get("repo_name") == "ipl" and r.get("user_id") == USER_A_ID), None)
+            assert ipl_row is not None
+            assert ipl_row["repository_owner"] == "kutty04"
+            assert ipl_row["canonical_url"] == "https://github.com/kutty04/ipl"
+            assert ipl_row["provider"] == "github"
+            assert ipl_row["status"] == "active"
+            assert ipl_row["id"] == real_uuid
+
+    def test_failed_repo_registration_prevents_ingest_success(self, mock_embed):
+        """If user_repositories record insertion fails, /ingest fails with 500 and does not report success."""
+        original_table = MockSupabaseDB.table
+
+        def failing_table(self_db, name):
+            q = original_table(self_db, name)
+            if name == "user_repositories":
+                def failing_insert(data):
+                    raise Exception("DB schema constraint error")
+                q.insert = failing_insert
+            return q
+
+        with patch.object(MockSupabaseDB, "table", failing_table):
+            resp = client.post(
+                "/ingest",
+                headers={"Authorization": f"Bearer {USER_A_ID}"},
+                json={
+                    "repo_url": "https://github.com/someowner/failrepo.git",
+                    "user_id": USER_A_ID
+                }
+            )
+
+        assert resp.status_code == 500
+        assert "Repository registration failed" in resp.json()["detail"]
+
+    def test_all_projects_scope_excludes_orphan_snippets(self, mock_embed):
+        """All Projects search & graph omit orphan snippets that do not match user_repositories."""
+        # Add orphan snippet without user_repositories row
+        MOCK_SNIPPETS_DB.append({
+            "id": "s_orphan_secret",
+            "user_id": USER_A_ID,
+            "repository_id": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+            "repo_name": "link-shortner",
+            "file_path": "secret.py",
+            "code_content": "def secret_orphan_code(): pass",
+            "source_url": "https://github.com/test/link-shortner/blob/main/secret.py",
+            "index_version": "v1"
+        })
+
+        # All Projects Graph
+        resp_graph = client.get(
+            f"/graph-data?user_id={USER_A_ID}",
             headers={"Authorization": f"Bearer {USER_A_ID}"}
         )
+        assert resp_graph.status_code == 200
+        graph_nodes = [n["id"] for n in resp_graph.json()["nodes"]]
+        assert "link-shortner" not in graph_nodes
 
-        assert response.status_code == 200
-        result = response.json()
-        assert result["status"] == "ok"
-        assert isinstance(result["reconciled"], list)
+    def test_manually_imported_ipl_search_and_graph(self, mock_embed):
+        """After manual import, IPL has a real UUID and both scoped /search and /graph-data work cleanly."""
+        global MOCK_REPOSITORIES_DB, MOCK_SNIPPETS_DB
+        MOCK_REPOSITORIES_DB = [r for r in MOCK_REPOSITORIES_DB if r.get("repo_name") != "ipl"]
+        MOCK_SNIPPETS_DB = [s for s in MOCK_SNIPPETS_DB if s.get("repo_name") != "ipl"]
 
-        # After reconciliation, ipl should now have a real UUID in user_repositories
-        ipl_repo = next(
-            (r for r in MOCK_REPOSITORIES_DB if r.get("repo_name") == "ipl" and r.get("user_id") == USER_A_ID),
-            None
+        # Simulate manually imported IPL repo in user_repositories
+        IPL_UUID = "77777777-7777-7777-7777-777777777777"
+        MOCK_REPOSITORIES_DB.append({
+            "id": IPL_UUID,
+            "user_id": USER_A_ID,
+            "repository_name": "ipl",
+            "repo_name": "ipl",
+            "repository_owner": "kutty04",
+            "canonical_url": "https://github.com/kutty04/ipl",
+            "provider": "github",
+            "status": "active",
+            "active_index_version": "v1"
+        })
+
+        # Insert matching UUID-backed snippet
+        MOCK_SNIPPETS_DB.append({
+            "id": "s_ipl_imported",
+            "user_id": USER_A_ID,
+            "repository_id": IPL_UUID,
+            "repo_name": "ipl",
+            "file_path": "app.py",
+            "code_content": "def ipl_start_app(): print('IPL matches')",
+            "source_url": "https://github.com/kutty04/ipl/blob/main/app.py",
+            "index_version": "v1"
+        })
+
+        # 1. GET /user-repos includes ipl with real UUID
+        resp_repos = client.get(
+            f"/user-repos?user_id={USER_A_ID}",
+            headers={"Authorization": f"Bearer {USER_A_ID}"}
         )
-        assert ipl_repo is not None, "Reconcile must create a user_repositories row for ipl"
-        assert ipl_repo.get("id") is not None, "Reconciled repo must have a real UUID id"
-        try:
-            uuid.UUID(str(ipl_repo["id"]))
-        except ValueError:
-            assert False, f"Reconciled id must be a valid UUID, got: {ipl_repo['id']}"
+        assert resp_repos.status_code == 200
+        ipl_obj = next((r for r in resp_repos.json()["repositories"] if r["repo_name"] == "ipl"), None)
+        assert ipl_obj is not None
+        assert ipl_obj["id"] == IPL_UUID
+        assert ipl_obj["legacy"] is False
 
-        # User B's repos must NOT have been touched
-        user_b_repos_after = [r for r in MOCK_REPOSITORIES_DB if r.get("user_id") == USER_B_ID]
-        assert all(r.get("repo_name") == "user-b-private-repo" for r in user_b_repos_after)
+        # 2. Scoped Search with IPL_UUID
+        resp_search = client.post(
+            "/search",
+            headers={"Authorization": f"Bearer {USER_A_ID}"},
+            json={
+                "query": "ipl_start_app",
+                "user_id": USER_A_ID,
+                "repository_id": IPL_UUID,
+                "repo_filter": "ipl"
+            }
+        )
+        assert resp_search.status_code == 200
+        search_res = resp_search.json()
+        assert search_res["repository_id"] == IPL_UUID
+
+        # 3. Scoped Graph with IPL_UUID
+        resp_graph = client.get(
+            f"/graph-data?user_id={USER_A_ID}&repository_id={IPL_UUID}",
+            headers={"Authorization": f"Bearer {USER_A_ID}"}
+        )
+        assert resp_graph.status_code == 200
+        nodes = [n["id"] for n in resp_graph.json()["nodes"]]
+        assert "ipl" in nodes
 
     def test_scoped_search_rejects_legacy_null_id_as_repository_id(self, mock_embed):
-        """A legacy repo has id=None; sending None/null as repository_id must return 400."""
-        # Attempting to search with repository_id="None" (string) or an invalid ID that
-        # doesn't match any user_repositories row must be rejected.
+        """Sending None/null or non-UUID string as repository_id returns 400."""
         response = client.post(
             "/search",
             headers={"Authorization": f"Bearer {USER_A_ID}"},
             json={
                 "query": "ipl files",
                 "user_id": USER_A_ID,
-                "repository_id": "None"   # string "None" — must not be accepted as a real UUID
+                "repository_id": "None"
             }
         )
         assert response.status_code == 400

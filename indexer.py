@@ -76,6 +76,7 @@ class CodeIndexer:
         self.failed_count = 0
         self.snippets_to_index = []
         self.user_id = None
+        self.repository_id = None
         self.repos_path = repos_path or REPOS_PATH
         self.repo_url = repo_url
         self.repo_name = repo_name
@@ -293,7 +294,8 @@ class CodeIndexer:
                     "code_content": snippet["code_content"],
                     "embedding": embedding,
                     "source_url": snippet["source_url"],
-                    "user_id": self.user_id
+                    "user_id": self.user_id,
+                    "repository_id": getattr(self, "repository_id", None) or snippet.get("repository_id")
                 }
 
                 # Insert into Supabase

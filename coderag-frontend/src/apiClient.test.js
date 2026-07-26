@@ -142,117 +142,80 @@ describe('apiClient authentication & repository scope integrity', () => {
   });
 });
 
-describe('reconcile-legacy repair flow', () => {
+describe('ingest & user-repos repository lifecycle integrity', () => {
   beforeEach(() => {
     vi.resetAllMocks();
   });
 
-  it('repair button: /user-repos with legacy repos triggers a single authenticated POST to reconcile-legacy', async () => {
+  it('successful /ingest creates user_repositories row and returns real repository UUID', async () => {
     supabase.auth.getSession.mockResolvedValue({
-      data: { session: { access_token: 'repair-token-abc' } }
+      data: { session: { access_token: 'ingest-token-abc' } }
     });
+
+    const REAL_REPO_UUID = 'e8b7d41f-829d-4e99-b1d5-9988ff776655';
 
     global.fetch = vi.fn().mockResolvedValue({
       status: 200,
       ok: true,
       json: async () => ({
-        status: 'ok',
-        reconciled: [{ repo_name: 'ipl', id: 'f47ac10b-58cc-4372-a567-0e02b2c3d479' }],
-        errors: []
+        status: 'success',
+        message: 'Successfully indexed 12 snippets',
+        indexed_count: 12,
+        repository_id: REAL_REPO_UUID
       })
     });
 
-    const response = await apiFetch('/repositories/reconcile-legacy', { method: 'POST' });
-
-    // Must send exactly one fetch call
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-
-    // Must use POST method
-    const [url, opts] = global.fetch.mock.calls[0];
-    expect(opts.method).toBe('POST');
-
-    // Must send Authorization: Bearer from session token — never a fake UUID or repo name
-    expect(opts.headers['Authorization']).toBe('Bearer repair-token-abc');
-
-    // Body must NOT contain a repository_id (endpoint takes no repo ID)
-    const body = opts.body;
-    expect(body).toBeUndefined();
-
-    expect(response.ok).toBe(true);
-    const data = await response.json();
-    expect(data.status).toBe('ok');
-    expect(data.reconciled).toHaveLength(1);
-    expect(data.reconciled[0].repo_name).toBe('ipl');
-    // Reconciled repo must have a real UUID id, not null or a name string
-    expect(typeof data.reconciled[0].id).toBe('string');
-    expect(data.reconciled[0].id).not.toBe('ipl');
-    expect(data.reconciled[0].id).not.toBe('None');
-    expect(data.reconciled[0].id).not.toBeNull();
-  });
-
-  it('repair call: reconcile-legacy is never triggered by /user-repos (page load must not call it)', async () => {
-    supabase.auth.getSession.mockResolvedValue({
-      data: { session: { access_token: 'pageload-token' } }
+    const response = await apiFetch('/ingest', {
+      method: 'POST',
+      body: JSON.stringify({
+        repo_url: 'https://github.com/kutty04/ipl.git',
+        user_id: 'user-123'
+      })
     });
 
-    const fetchedUrls = [];
-    global.fetch = vi.fn().mockImplementation((url) => {
-      fetchedUrls.push(url);
-      return Promise.resolve({
-        status: 200,
-        ok: true,
-        json: async () => ({
-          repos: ['ipl'],
-          repositories: [{ id: null, repo_name: 'ipl', legacy: true }]
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/ingest'),
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'Authorization': 'Bearer ingest-token-abc'
         })
-      });
-    });
+      })
+    );
 
-    // Simulate page load: call /user-repos only
-    await apiFetch('/user-repos?user_id=some-uid');
-
-    // Exactly one fetch call — only /user-repos
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-    expect(fetchedUrls[0]).toContain('/user-repos');
-    // reconcile-legacy must NOT have been called automatically
-    expect(fetchedUrls.every(u => !u.includes('reconcile-legacy'))).toBe(true);
+    const data = await response.json();
+    expect(data.status).toBe('success');
+    expect(data.repository_id).toBe(REAL_REPO_UUID);
   });
 
-  it('after successful repair: /user-repos returns real UUID for previously-legacy ipl repo', async () => {
+  it('/user-repos is read-only and queries only user_repositories for authenticated user', async () => {
     supabase.auth.getSession.mockResolvedValue({
-      data: { session: { access_token: 'post-repair-token' } }
+      data: { session: { access_token: 'user-repos-token' } }
     });
 
-    const REAL_IPL_UUID = 'a3bb189e-8bf9-3888-9912-ace4e6543002';
-
-    // First call: /user-repos after reconciliation returns ipl with a real UUID
     global.fetch = vi.fn().mockResolvedValue({
       status: 200,
       ok: true,
       json: async () => ({
         repos: ['ipl'],
         repositories: [{
-          id: REAL_IPL_UUID,
-          repo_name: 'ipl',
+          id: 'e8b7d41f-829d-4e99-b1d5-9988ff776655',
           repository_name: 'ipl',
+          repo_name: 'ipl',
+          repository_owner: 'kutty04',
+          canonical_url: 'https://github.com/kutty04/ipl',
           legacy: false,
           status: 'active'
         }]
       })
     });
 
-    const response = await apiFetch('/user-repos?user_id=some-uid');
+    const response = await apiFetch('/user-repos?user_id=user-123');
     const data = await response.json();
 
-    const iplRepo = data.repositories.find(r => r.repo_name === 'ipl');
-    expect(iplRepo).toBeDefined();
-    // After repair, ipl must have a real UUID id
-    expect(iplRepo.id).toBe(REAL_IPL_UUID);
-    // After repair, ipl must NOT be legacy
-    expect(iplRepo.legacy).toBe(false);
-    // The id must not be a name string
-    expect(iplRepo.id).not.toBe('ipl');
-    expect(iplRepo.id).not.toBeNull();
+    expect(data.repos).toEqual(['ipl']);
+    expect(data.repositories[0].id).toBe('e8b7d41f-829d-4e99-b1d5-9988ff776655');
+    expect(data.repositories[0].legacy).toBe(false);
   });
 });
 

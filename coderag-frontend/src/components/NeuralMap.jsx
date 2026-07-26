@@ -22,7 +22,7 @@ export default function NeuralMap({ user, repoFilter = '', repositoryId = '' }) 
 
       const res = await apiFetch(queryUrl);
       if (!res.ok) {
-        setError('Knowledge Map is unavailable in this backend version.');
+        setError('Unable to load Neural Map for the selected repository.');
         return;
       }
       const data = await res.json();
@@ -33,7 +33,7 @@ export default function NeuralMap({ user, repoFilter = '', repositoryId = '' }) 
       }
     } catch (err) {
       console.warn('Failed to fetch graph data:', err);
-      setError('Knowledge Map is unavailable in this version.');
+      setError('Failed to load Knowledge Map for the selected repository.');
     } finally {
       setLoading(false);
     }
