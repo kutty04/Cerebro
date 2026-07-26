@@ -477,20 +477,41 @@ FOLLOW_UPS:
                     "Authorization": f"Bearer {hf_token}",
                     "Content-Type": "application/json"
                 }
-                payload = {
-                    "model": "meta-llama/Llama-3.1-8B-Instruct",
-                    "messages": messages,
-                    "max_tokens": 500,
-                    "temperature": 0.5
-                }
                 
-                res = requests.post(url, headers=headers, json=payload, timeout=15)
+                models_to_try = [
+                    "meta-llama/Llama-3.1-8B-Instruct",
+                    "Qwen/Qwen2.5-Coder-32B-Instruct",
+                    "mistralai/Mistral-7B-Instruct-v0.3"
+                ]
                 
-                if res.status_code == 200:
-                    final_answer = res.json()["choices"][0]["message"]["content"]
-                else:
-                    logger.error(f"HF Router Error: Status {res.status_code}")
-                    final_answer = f"Cerebro link established! Retrieved {len(sources)} matching code snippets, but AI response generation is currently unavailable (Status {res.status_code})."
+                final_answer = None
+                last_status = None
+
+                for model_name in models_to_try:
+                    payload = {
+                        "model": model_name,
+                        "messages": messages,
+                        "max_tokens": 500,
+                        "temperature": 0.5
+                    }
+                    try:
+                        res = requests.post(url, headers=headers, json=payload, timeout=(10, 40))
+                        if res.status_code == 200:
+                            final_answer = res.json()["choices"][0]["message"]["content"]
+                            break
+                        else:
+                            last_status = res.status_code
+                            logger.warning(f"HF Router model '{model_name}' returned status {res.status_code}, trying fallback model...")
+                    except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout) as to_e:
+                        logger.warning(f"HF Router model '{model_name}' timed out ({type(to_e).__name__}), trying fallback model...")
+                    except Exception as try_e:
+                        logger.warning(f"HF Router model '{model_name}' failed ({type(try_e).__name__}), trying fallback model...")
+
+                if not final_answer:
+                    if last_status:
+                        final_answer = f"Cerebro link established! Retrieved {len(sources)} matching code snippets, but AI response generation is currently unavailable (Status {last_status})."
+                    else:
+                        final_answer = f"Cerebro link established! Retrieved {len(sources)} matching code snippets, but AI response generation timed out."
         except Exception as api_e:
             logger.error(f"HF Router Connection Error: {type(api_e).__name__}")
             final_answer = f"Cerebro link established! Retrieved {len(sources)} matching code snippets, but AI response generation is currently unavailable."

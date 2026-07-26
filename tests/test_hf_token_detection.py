@@ -114,3 +114,39 @@ class TestHFTokenDetection:
             assert "currently unavailable" in data["answer"]
             assert "configure HF_TOKEN" not in data["answer"]
             assert "hf_active_secret_token" not in str(data)
+
+    @patch("app.db")
+    @patch("requests.post")
+    def test_read_timeout_falls_back_resiliently(self, mock_requests_post, mock_db):
+        import requests
+        mock_db.auth.get_user.side_effect = mock_supabase_auth
+
+        mock_rpc = MagicMock()
+        mock_rpc.execute.return_value.data = [
+            {"id": "s4", "repo_name": "repo1", "file_path": "main.py", "language": "python", "code_content": "def main(): pass", "source_url": "http://example.com", "repository_id": "r1", "index_version": "v1"}
+        ]
+        mock_db.rpc.return_value = mock_rpc
+
+        mock_kw = MagicMock()
+        mock_kw.eq.return_value.ilike.return_value.limit.return_value.execute.return_value.data = []
+        mock_db.table.return_value.select.return_value.eq.return_value = mock_kw
+
+        # Simulate ReadTimeout for first model, success for second
+        res_ok = MagicMock()
+        res_ok.status_code = 200
+        res_ok.json.return_value = {
+            "choices": [{"message": {"content": "Answer from fallback model after primary timeout."}}]
+        }
+        mock_requests_post.side_effect = [requests.exceptions.ReadTimeout("Read timed out"), res_ok]
+
+        with patch.dict(os.environ, {"HF_TOKEN": "hf_timeout_test_token"}):
+            response = client.post(
+                "/search",
+                headers={"Authorization": f"Bearer {USER_ID}"},
+                json={"query": "unique test query for read timeout fallback 104"}
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert "fallback model" in data["answer"]
+            assert len(data["sources"]) > 0
+
