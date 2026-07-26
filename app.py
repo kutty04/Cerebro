@@ -196,12 +196,20 @@ async def search_code(request: SearchRequest):
         repo_name=request.repo_filter
     )
 
-    # Check cache first
-    cached = get_cached_query(request.query, verified_repo_id or verified_repo_name)
+    repo_scope = verified_repo_id or verified_repo_name or "ALL"
+    index_ver = verified_active_version or "v1"
+
+    # Check cache first with tenant + repo + index_version isolation
+    cached = get_cached_query(
+        query=request.query, 
+        user_id=request.user_id, 
+        repo_scope=repo_scope, 
+        index_version=index_ver
+    )
     if cached:
         logger.info("⚡ Returning cached answer")
         latency_ms = int((time.time() - start_time) * 1000)
-        log_search(request.query, verified_repo_name or verified_repo_id, cached["confidence"], latency_ms)
+        log_search(request.query, repo_scope, cached["confidence"], latency_ms)
         return SearchResponse(
             answer=cached["answer"],
             sources=cached["sources"],
@@ -408,9 +416,17 @@ FOLLOW_UPS:
 
         # Log analytics and save history
         latency_ms = (time.time() - start_time) * 1000
-        log_search(request.query, request.repo_filter, confidence, latency_ms)
+        log_search(request.query, repo_scope, confidence, latency_ms)
         save_chat("default_thread", request.query, answer_text, sources)
-        set_cached_query(request.query, request.repo_filter, answer_text, sources, confidence)
+        set_cached_query(
+            query=request.query,
+            user_id=request.user_id,
+            repo_scope=repo_scope,
+            answer=answer_text,
+            sources=sources,
+            confidence=confidence,
+            index_version=index_ver
+        )
 
         return SearchResponse(
             answer=answer_text,

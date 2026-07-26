@@ -38,21 +38,33 @@ def init_db():
             )
         ''')
 
-def get_cache_key(query: str, repo_filter: str) -> str:
-    raw = f"{query}_{repo_filter or 'ALL'}"
-    return hashlib.md5(raw.encode()).hexdigest()
+def get_cache_key(query: str, user_id: str, repo_scope: str = "ALL", index_version: str = "v1") -> str:
+    """
+    Generates a cryptographically isolated cache key for tenant + repo + index_version + normalized query.
+    Prevents cross-user cache leakage or cross-version cache stale hits.
+    """
+    norm_query = (query or "").strip().lower()
+    norm_user = (user_id or "anonymous").strip()
+    norm_repo = (repo_scope or "ALL").strip()
+    norm_ver = (index_version or "v1").strip()
 
-def get_cached_query(query: str, repo_filter: str):
+    raw = f"u:{norm_user}|r:{norm_repo}|v:{norm_ver}|q:{norm_query}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+def get_cached_query(query: str, user_id: str, repo_scope: str = "ALL", index_version: str = "v1"):
+    if not user_id:
+        return None
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
+            key = get_cache_key(query, user_id=user_id, repo_scope=repo_scope, index_version=index_version)
             # Cache expires after 24 hours
             cursor.execute('''
                 SELECT answer, sources_json, confidence 
                 FROM query_cache 
                 WHERE query_hash = ? AND timestamp >= datetime('now', '-1 day')
-            ''', (get_cache_key(query, repo_filter),))
+            ''', (key,))
             row = cursor.fetchone()
             if row:
                 return {
@@ -64,13 +76,16 @@ def get_cached_query(query: str, repo_filter: str):
         print(f"Cache Read Error: {e}")
     return None
 
-def set_cached_query(query: str, repo_filter: str, answer: str, sources: list, confidence: int):
+def set_cached_query(query: str, user_id: str, repo_scope: str, answer: str, sources: list, confidence: int, index_version: str = "v1"):
+    if not user_id:
+        return
     try:
         with sqlite3.connect(DB_PATH) as conn:
+            key = get_cache_key(query, user_id=user_id, repo_scope=repo_scope, index_version=index_version)
             conn.execute('''
                 INSERT OR REPLACE INTO query_cache (query_hash, answer, sources_json, confidence)
                 VALUES (?, ?, ?, ?)
-            ''', (get_cache_key(query, repo_filter), answer, json.dumps(sources), confidence))
+            ''', (key, answer, json.dumps(sources), confidence))
     except Exception as e:
         print(f"Cache Write Error: {e}")
 
