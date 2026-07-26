@@ -33,6 +33,14 @@ describe('apiClient authentication & repository scope integrity', () => {
     });
   });
 
+  it('throws session expired error when no session or access_token exists', async () => {
+    supabase.auth.getSession.mockResolvedValue({
+      data: { session: null }
+    });
+
+    await expect(getAuthHeaders()).rejects.toThrow('Your session has expired. Please sign in again.');
+  });
+
   it('routes /search request with repository_id and repo_filter scoping', async () => {
     supabase.auth.getSession.mockResolvedValue({
       data: { session: { access_token: 'valid-search-token' } }
@@ -52,7 +60,7 @@ describe('apiClient authentication & repository scope integrity', () => {
       body: JSON.stringify({ 
         query: 'What is this project about?',
         repo_filter: 'Jarvis-portfolio',
-        repository_id: 'repo-jarvis-001'
+        repository_id: 'bde55722-56eb-48e6-a6f4-ebb219328a67'
       })
     });
 
@@ -86,7 +94,7 @@ describe('apiClient authentication & repository scope integrity', () => {
       })
     });
 
-    const response = await apiFetch('/graph-data?user_id=usr-123&repository_id=repo-jarvis-001');
+    const response = await apiFetch('/graph-data?user_id=usr-123&repository_id=bde55722-56eb-48e6-a6f4-ebb219328a67');
     const data = await response.json();
     const repoNodes = data.nodes.filter(n => n.id !== 'ME').map(n => n.id);
     expect(repoNodes.every(id => id.includes('Jarvis-portfolio'))).toBe(true);

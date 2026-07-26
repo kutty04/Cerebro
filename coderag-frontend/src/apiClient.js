@@ -7,25 +7,25 @@ const getRawApiUrl = () => {
 
 /**
  * Gets the current Supabase session access token safely.
+ * Throws an Error if no active session or valid access_token exists.
  */
 export async function getAuthHeaders() {
-  try {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session || !session.access_token) {
-      return { 'Content-Type': 'application/json' };
-    }
-    return {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${session.access_token}`
-    };
-  } catch (err) {
-    console.warn('Failed to retrieve auth token:', err);
-    return { 'Content-Type': 'application/json' };
+  const { data: { session } } = await supabase.auth.getSession();
+  const token = session?.access_token;
+
+  if (!token) {
+    throw new Error('Your session has expired. Please sign in again.');
   }
+
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${token}`
+  };
 }
 
 /**
  * Central authenticated API fetch helper.
+ * Enforces session verification before making any network request.
  */
 export async function apiFetch(endpoint, options = {}) {
   const baseUrl = getRawApiUrl();
@@ -43,7 +43,7 @@ export async function apiFetch(endpoint, options = {}) {
   });
 
   if (response.status === 401) {
-    throw new Error('Authentication required or session expired. Please sign in again.');
+    throw new Error('Your session has expired. Please sign in again.');
   }
 
   return response;
