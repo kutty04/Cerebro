@@ -179,7 +179,7 @@ export default function Cerebro({ user }) {
       return {
         link: dbUrl,
         label: dbUrl.includes('github.com') ? 'GitHub' : 'External',
-        icon: <Github size={14} />
+        icon: <ExternalLink size={14} />
       };
     }
 
