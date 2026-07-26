@@ -131,22 +131,18 @@ class TestHFTokenDetection:
         mock_kw.eq.return_value.ilike.return_value.limit.return_value.execute.return_value.data = []
         mock_db.table.return_value.select.return_value.eq.return_value = mock_kw
 
-        # Simulate ReadTimeout for first model, success for second
-        res_ok = MagicMock()
-        res_ok.status_code = 200
-        res_ok.json.return_value = {
-            "choices": [{"message": {"content": "Answer from fallback model after primary timeout."}}]
-        }
-        mock_requests_post.side_effect = [requests.exceptions.ReadTimeout("Read timed out"), res_ok]
+        # Simulate ReadTimeout for Llama model request
+        mock_requests_post.side_effect = requests.exceptions.ReadTimeout("Read timed out")
 
         with patch.dict(os.environ, {"HF_TOKEN": "hf_timeout_test_token"}):
             response = client.post(
                 "/search",
                 headers={"Authorization": f"Bearer {USER_ID}"},
-                json={"query": "unique test query for read timeout fallback 104"}
+                json={"query": "unique test query for single Llama timeout 105"}
             )
             assert response.status_code == 200
             data = response.json()
-            assert "fallback model" in data["answer"]
+            assert "timed out" in data["answer"]
             assert len(data["sources"]) > 0
+            assert "configure HF_TOKEN" not in data["answer"]
 
