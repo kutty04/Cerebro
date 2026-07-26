@@ -1,23 +1,32 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
-import { Activity, Maximize2, Minimize2 } from 'lucide-react';
+import { Activity, Maximize2, Cpu } from 'lucide-react';
+import { apiFetch } from '../apiClient';
 
 export default function NeuralMap({ user }) {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const fgRef = useRef();
 
   const fetchGraphData = async () => {
     setLoading(true);
+    setError('');
     try {
-      const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
-      const res = await fetch(`${apiUrl}/graph-data?user_id=${user.id}`);
-      if (!res.ok) throw new Error('Graph data endpoint not found. Restart your backend!');
+      const res = await apiFetch(`/graph-data?user_id=${user.id}`);
+      if (!res.ok) {
+        setError('Knowledge Map is unavailable in this backend version.');
+        return;
+      }
       const data = await res.json();
-      setGraphData(data);
+      if (Array.isArray(data?.nodes) && Array.isArray(data?.links)) {
+        setGraphData(data);
+      } else {
+        setGraphData({ nodes: [], links: [] });
+      }
     } catch (err) {
-      console.error('Failed to fetch graph data:', err);
+      console.warn('Failed to fetch graph data:', err);
+      setError('Knowledge Map is unavailable in this version.');
     } finally {
       setLoading(false);
     }
@@ -29,17 +38,29 @@ export default function NeuralMap({ user }) {
 
   useEffect(() => {
     // Zoom to fit after data loads
-    if (!loading && fgRef.current) {
+    if (!loading && fgRef.current && !error) {
         setTimeout(() => {
             fgRef.current.zoomToFit(400);
         }, 500);
     }
-  }, [loading]);
+  }, [loading, error]);
 
   if (loading) {
     return (
       <div className="loading-state" style={{ height: '500px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <Activity className="spin" /> Mapping Neural Network...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="neural-map-container" style={{ padding: '3rem', textAlign: 'center' }}>
+        <div className="empty-state" style={{ background: 'rgba(15, 23, 42, 0.6)', borderRadius: '24px', padding: '3rem', border: '1px solid rgba(56, 189, 248, 0.1)' }}>
+          <Cpu size={48} className="neon-icon" style={{ marginBottom: '1rem', opacity: 0.7 }} />
+          <h3>Knowledge Map Notice</h3>
+          <p style={{ color: '#94a3b8', marginTop: '0.5rem' }}>{error}</p>
+        </div>
       </div>
     );
   }

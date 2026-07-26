@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Search, BrainCircuit, Terminal, Cpu, Zap, FolderDot, Copy, Check, ExternalLink, Activity, GitBranch } from 'lucide-react';
 import Auth from './Auth';
 import NeuralMap from './NeuralMap';
+import ErrorBoundary from './ErrorBoundary';
+import { apiFetch } from '../apiClient';
 import './CodeRAG.css';
 
 import ReactMarkdown from 'react-markdown';
@@ -56,11 +58,11 @@ export default function Cerebro({ user }) {
   const [ingestUrl, setIngestUrl] = useState('');
   const [ingestStatus, setIngestStatus] = useState({ loading: false, error: '', success: '', logs: [] });
 
-  const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-  const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
-
   const addLog = (msg) => {
-    setIngestStatus(prev => ({ ...prev, logs: [...prev.logs, msg] }));
+    setIngestStatus(prev => ({
+      ...prev,
+      logs: Array.isArray(prev.logs) ? [...prev.logs, msg] : [msg]
+    }));
   };
 
   const handleIngest = async (e) => {
@@ -74,9 +76,8 @@ export default function Cerebro({ user }) {
       setTimeout(() => addLog('📁 Scanning file structure...'), 1800);
       setTimeout(() => addLog('🧠 Generating semantic embeddings...'), 3500);
 
-      const response = await fetch(`${apiUrl}/ingest`, {
+      const response = await apiFetch('/ingest', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           repo_url: ingestUrl, 
           user_id: user.id 
@@ -89,27 +90,29 @@ export default function Cerebro({ user }) {
       setIngestStatus({ 
         loading: false, 
         error: '', 
-        success: `Successfully connected ${data.indexed_count} nodes to Cerebro!` 
+        success: `Successfully connected ${data.indexed_count || 0} nodes to Cerebro!`,
+        logs: []
       });
       setIngestUrl('');
       setTimeout(() => setShowIngestModal(false), 3000);
     } catch (err) {
-      setIngestStatus({ loading: false, error: err.message, success: '' });
+      setIngestStatus({ loading: false, error: err.message || 'Ingestion failed', success: '', logs: [] });
     }
   };
 
   const fetchDashboardData = async () => {
     try {
-      const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
       const [res1, res2] = await Promise.all([
-        fetch(`${apiUrl}/analytics`),
-        fetch(`${apiUrl}/history`)
+        apiFetch('/analytics').catch(() => null),
+        apiFetch('/history').catch(() => null)
       ]);
-      setAnalytics(await res1.json());
-      setHistory(await res2.json());
+      const analyticsData = (res1 && res1.ok) ? await res1.json().catch(() => null) : null;
+      const historyData = (res2 && res2.ok) ? await res2.json().catch(() => []) : [];
+      setAnalytics(analyticsData);
+      setHistory(Array.isArray(historyData) ? historyData : []);
     } catch (err) {
       console.error("Failed to fetch dashboard data:", err);
+      setHistory([]);
     }
   };
 
@@ -119,13 +122,16 @@ export default function Cerebro({ user }) {
   const fetchUserRepos = async () => {
     setRepoLoading(true);
     try {
-      const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
-      const res = await fetch(`${apiUrl}/user-repos?user_id=${user.id}`);
+      const res = await apiFetch(`/user-repos?user_id=${user.id}`);
+      if (!res.ok) {
+        setUserRepos([]);
+        return;
+      }
       const data = await res.json();
-      setUserRepos(data.repos || []);
+      setUserRepos(Array.isArray(data.repos) ? data.repos : []);
     } catch (err) {
       console.error('Failed to fetch repos:', err);
+      setUserRepos([]);
     } finally {
       setRepoLoading(false);
     }
@@ -135,11 +141,9 @@ export default function Cerebro({ user }) {
     if (!confirm(`Are you sure you want to delete ${repoName}? This cannot be undone.`)) return;
     
     try {
-      const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
-      const res = await fetch(`${apiUrl}/delete-repo?repo_name=${repoName}&user_id=${user.id}`, { method: 'POST' });
+      const res = await apiFetch(`/delete-repo?repo_name=${encodeURIComponent(repoName)}&user_id=${user.id}`, { method: 'POST' });
       if (res.ok) {
-        setUserRepos(prev => prev.filter(r => r !== repoName));
+        setUserRepos(prev => (Array.isArray(prev) ? prev.filter(r => r !== repoName) : []));
       }
     } catch (err) {
       alert('Failed to delete repository');
@@ -316,7 +320,9 @@ export default function Cerebro({ user }) {
         )}
 
         {view === 'graph' && (
-          <NeuralMap user={user} />
+          <ErrorBoundary fallbackTitle="Neural Map Interrupted">
+            <NeuralMap user={user} />
+          </ErrorBoundary>
         )}
 
         {view === 'search' && (
@@ -340,7 +346,7 @@ export default function Cerebro({ user }) {
                 className="repo-select"
               >
                 <option value="">All Projects</option>
-                {userRepos.map(repo => (
+                {(Array.isArray(userRepos) ? userRepos : []).map(repo => (
                   <option key={repo} value={repo}>{repo}</option>
                 ))}
               </select>
@@ -392,7 +398,7 @@ export default function Cerebro({ user }) {
                     </ReactMarkdown>
                   </div>
 
-                  {results.follow_ups && results.follow_ups.length > 0 && (
+                  {Array.isArray(results.follow_ups) && results.follow_ups.length > 0 && (
                     <div className="follow-ups-container">
                       <p className="follow-ups-title">💡 Suggested Follow-ups:</p>
                       <div className="follow-ups-list">
@@ -414,7 +420,7 @@ export default function Cerebro({ user }) {
                 </div>
 
                 <div className="snippets-grid">
-                  {results.sources.map((source, idx) => (
+                  {(Array.isArray(results.sources) ? results.sources : []).map((source, idx) => (
                     <div key={idx} className="snippet-card">
                       <div className="card-header" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
                         <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem'}}>
@@ -423,7 +429,7 @@ export default function Cerebro({ user }) {
                           <span className="file-path">/{source.file}</span>
                         </div>
                         {(() => {
-                          const sourceInfo = getSourceInfo(source.repo, source.file, source.url);
+                          const sourceInfo = getSourceInfo(source.repo || '', source.file || '', source.url || '');
                           return (
                             <a 
                               href={sourceInfo.link} 
@@ -457,42 +463,46 @@ export default function Cerebro({ user }) {
         )}
 
         {view === 'dashboard' && (
-          <div className="dashboard-container">
-            {analytics && (
-              <div className="stats-grid">
-                <div className="stat-card">
-                  <h4>Total Queries</h4>
-                  <p className="stat-value">{analytics.total_searches}</p>
-                </div>
-                <div className="stat-card">
-                  <h4>Avg Latency</h4>
-                  <p className="stat-value">{analytics.avg_latency_ms} ms</p>
-                </div>
-                <div className="stat-card">
-                  <h4>Avg Confidence</h4>
-                  <p className="stat-value">{analytics.avg_confidence}%</p>
-                </div>
-              </div>
-            )}
-            
-            <div className="history-section">
-              <h3>Recent Neural Syncs (Chat History)</h3>
-              <div className="history-list">
-                {history.map((item, idx) => (
-                  <div key={idx} className="history-item">
-                    <div className="history-q">
-                      <Terminal size={14}/> {item.query}
-                    </div>
-                    <div className="history-a">
-                      {item.answer.substring(0, 200)}...
-                    </div>
-            <div className="history-meta">{item.timestamp}</div>
+          <ErrorBoundary fallbackTitle="Telemetry View Interrupted">
+            <div className="dashboard-container">
+              {analytics && (
+                <div className="stats-grid">
+                  <div className="stat-card">
+                    <h4>Total Queries</h4>
+                    <p className="stat-value">{analytics.total_searches ?? 0}</p>
                   </div>
-                ))}
-                {history.length === 0 && <p className="text-muted">No history found. Run a query first!</p>}
+                  <div className="stat-card">
+                    <h4>Avg Latency</h4>
+                    <p className="stat-value">{analytics.avg_latency_ms ?? 0} ms</p>
+                  </div>
+                  <div className="stat-card">
+                    <h4>Avg Confidence</h4>
+                    <p className="stat-value">{analytics.avg_confidence ?? 0}%</p>
+                  </div>
+                </div>
+              )}
+              
+              <div className="history-section">
+                <h3>Recent Neural Syncs (Chat History)</h3>
+                <div className="history-list">
+                  {(Array.isArray(history) ? history : []).map((item, idx) => (
+                    <div key={idx} className="history-item">
+                      <div className="history-q">
+                        <Terminal size={14}/> {item.query || ''}
+                      </div>
+                      <div className="history-a">
+                        {typeof item.answer === 'string' ? item.answer.substring(0, 200) : ''}...
+                      </div>
+                      <div className="history-meta">{item.timestamp || ''}</div>
+                    </div>
+                  ))}
+                  {(!Array.isArray(history) || history.length === 0) && (
+                    <p className="text-muted">No history found. Run a query first!</p>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
+          </ErrorBoundary>
         )}
 
         {showIngestModal && (
@@ -538,7 +548,7 @@ export default function Cerebro({ user }) {
                     <span className="terminal-title">Neural Status Terminal</span>
                   </div>
                   <div className="terminal-body">
-                    {ingestStatus.logs.map((log, i) => (
+                    {(Array.isArray(ingestStatus.logs) ? ingestStatus.logs : []).map((log, i) => (
                       <div key={i} className="terminal-line animate-slide-in">
                         <span className="terminal-prompt">&gt;</span> {log}
                       </div>
