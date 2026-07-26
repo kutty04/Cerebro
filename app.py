@@ -611,9 +611,11 @@ async def ingest_repo(
             "indexed_count": len(snippets)
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"❌ Ingestion failed: {type(e).__name__}")
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {type(e).__name__}")
+        logger.error(f"❌ Ingestion failed: {type(e).__name__} - {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
     finally:
         # 4. Cleanup with Force (Handles read-only files in .git on Windows)
         def onerror(func, path, exc_info):

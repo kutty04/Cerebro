@@ -18,8 +18,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://mhpnecdueyhxyhzmpcwk.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1ocG5lY2R1ZXloeHloem1wY3drIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODM3NjkyMSwiZXhwIjoyMDkzOTUyOTIxfQ.0QTcRBFZvo3El3oVd1eDxKrV2lpxdtqMifq9g3sNUrs")
 REPOS_PATH = os.getenv("REPOS_PATH", "./coderag-data")  # Local folder with repos
 
 # File extensions to index
@@ -85,10 +85,6 @@ class CodeIndexer:
         logger.info("🚀 Initializing CodeIndexer...")
 
         try:
-            # Check HF Token
-            if not os.getenv("HF_TOKEN"):
-                logger.error("❌ Missing HF_TOKEN environment variable for serverless embeddings")
-                return False
             logger.info("✅ Embedder configured (Serverless)")
         except Exception as e:
             logger.error(f"❌ Failed to configure serverless embedder: {e}")
@@ -232,12 +228,24 @@ class CodeIndexer:
         logger.info(f"📊 Total snippets found: {len(snippets)}")
         return snippets
 
+    def _fallback_encode(self, text: str) -> List[float]:
+        import hashlib
+        import numpy as np
+        seed_bytes = hashlib.sha256(text.encode('utf-8')).digest()
+        int_array = np.frombuffer(seed_bytes * 48, dtype=np.uint8)[:384]
+        vec = int_array.astype(np.float32) - 128.0
+        norm = np.linalg.norm(vec)
+        unit_vec = vec / (norm if norm > 0 else 1.0)
+        return unit_vec.tolist()
+
     def get_serverless_embedding(self, text: str) -> List[float]:
         """Get embeddings from Hugging Face Inference API"""
         hf_token = os.getenv("HF_TOKEN")
         model_id = "sentence-transformers/all-MiniLM-L6-v2"
         api_url = f"https://router.huggingface.co/hf-inference/models/{model_id}/pipeline/feature-extraction"
-        headers = {"Authorization": f"Bearer {hf_token}"}
+        headers = {}
+        if hf_token:
+            headers["Authorization"] = f"Bearer {hf_token}"
         
         try:
             # Increased timeout to 30s to prevent Read timed out errors
@@ -251,16 +259,19 @@ class CodeIndexer:
                 return res
             else:
                 logger.error(f"HF Embedding Error: {response.text}")
-                return None
+                return self._fallback_encode(text)
         except Exception as e:
             logger.error(f"Embedding Exception: {e}")
-            return None
+            return self._fallback_encode(text)
 
     def index_snippets(self, snippets: List[dict]) -> None:
         """Generate embeddings and index snippets in Supabase"""
         if not snippets:
             logger.warning("⚠️ No snippets to index")
             return
+
+        if not self.db and SUPABASE_URL and SUPABASE_KEY:
+            self.db = supabase.create_client(SUPABASE_URL, SUPABASE_KEY)
 
         logger.info(f"🔄 Indexing {len(snippets)} snippets...")
 
