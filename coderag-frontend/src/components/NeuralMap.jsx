@@ -3,7 +3,7 @@ import ForceGraph2D from 'react-force-graph-2d';
 import { Activity, Maximize2, Cpu } from 'lucide-react';
 import { apiFetch } from '../apiClient';
 
-export default function NeuralMap({ user }) {
+export default function NeuralMap({ user, repoFilter = '', repositoryId = '' }) {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -13,7 +13,14 @@ export default function NeuralMap({ user }) {
     setLoading(true);
     setError('');
     try {
-      const res = await apiFetch(`/graph-data?user_id=${user.id}`);
+      let queryUrl = `/graph-data?user_id=${user.id}`;
+      if (repositoryId) {
+        queryUrl += `&repository_id=${encodeURIComponent(repositoryId)}`;
+      } else if (repoFilter) {
+        queryUrl += `&repo_name=${encodeURIComponent(repoFilter)}`;
+      }
+
+      const res = await apiFetch(queryUrl);
       if (!res.ok) {
         setError('Knowledge Map is unavailable in this backend version.');
         return;
@@ -34,7 +41,7 @@ export default function NeuralMap({ user }) {
 
   useEffect(() => {
     fetchGraphData();
-  }, [user.id]);
+  }, [user.id, repoFilter, repositoryId]);
 
   useEffect(() => {
     // Zoom to fit after data loads

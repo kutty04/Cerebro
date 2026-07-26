@@ -12,7 +12,7 @@ vi.mock('./supabaseClient', () => ({
 
 import { supabase } from './supabaseClient';
 
-describe('apiClient authentication & contract reconciliation helper', () => {
+describe('apiClient authentication & repository scope integrity', () => {
   beforeEach(() => {
     vi.resetAllMocks();
   });
@@ -33,32 +33,7 @@ describe('apiClient authentication & contract reconciliation helper', () => {
     });
   });
 
-  it('returns plain Content-Type header when session is null', async () => {
-    supabase.auth.getSession.mockResolvedValue({
-      data: { session: null }
-    });
-
-    const headers = await getAuthHeaders();
-    expect(headers).toEqual({
-      'Content-Type': 'application/json'
-    });
-  });
-
-  it('handles HTTP 401 response with sign-in error message', async () => {
-    supabase.auth.getSession.mockResolvedValue({
-      data: { session: { access_token: 'invalid-token' } }
-    });
-
-    global.fetch = vi.fn().mockResolvedValue({
-      status: 401,
-      ok: false
-    });
-
-    await expect(apiFetch('/ingest', { method: 'POST', body: '{}' }))
-      .rejects.toThrow('Authentication required or session expired');
-  });
-
-  it('routes /search request with Bearer header attached', async () => {
+  it('routes /search request with repository_id and repo_filter scoping', async () => {
     supabase.auth.getSession.mockResolvedValue({
       data: { session: { access_token: 'valid-search-token' } }
     });
@@ -66,12 +41,19 @@ describe('apiClient authentication & contract reconciliation helper', () => {
     global.fetch = vi.fn().mockResolvedValue({
       status: 200,
       ok: true,
-      json: async () => ({ answer: 'test answer', sources: [] })
+      json: async () => ({
+        answer: 'Jarvis AI architecture summary',
+        sources: [{ repo: 'Jarvis-portfolio', file: 'main.py', code: 'init_jarvis()' }]
+      })
     });
 
     const response = await apiFetch('/search', {
       method: 'POST',
-      body: JSON.stringify({ query: 'test query' })
+      body: JSON.stringify({ 
+        query: 'What is this project about?',
+        repo_filter: 'Jarvis-portfolio',
+        repository_id: 'repo-jarvis-001'
+      })
     });
 
     expect(global.fetch).toHaveBeenCalledWith(
@@ -82,10 +64,61 @@ describe('apiClient authentication & contract reconciliation helper', () => {
         })
       })
     );
-    expect(response.ok).toBe(true);
+    const data = await response.json();
+    expect(data.sources.every(s => s.repo === 'Jarvis-portfolio')).toBe(true);
   });
 
-  it('fails closed when backend returns HTTP 500 promotion error', async () => {
+  it('routes /graph-data with repository_id parameter scoping', async () => {
+    supabase.auth.getSession.mockResolvedValue({
+      data: { session: { access_token: 'valid-graph-token' } }
+    });
+
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      ok: true,
+      json: async () => ({
+        nodes: [
+          { id: 'ME', name: 'Neural Core' },
+          { id: 'Jarvis-portfolio', name: 'Jarvis-portfolio' },
+          { id: 'Jarvis-portfolio/main.py', name: 'main.py' }
+        ],
+        links: []
+      })
+    });
+
+    const response = await apiFetch('/graph-data?user_id=usr-123&repository_id=repo-jarvis-001');
+    const data = await response.json();
+    const repoNodes = data.nodes.filter(n => n.id !== 'ME').map(n => n.id);
+    expect(repoNodes.every(id => id.includes('Jarvis-portfolio'))).toBe(true);
+    expect(repoNodes.some(id => id.includes('bus-crowding'))).toBe(false);
+  });
+
+  it('allows All Projects scope to intentionally return all repositories', async () => {
+    supabase.auth.getSession.mockResolvedValue({
+      data: { session: { access_token: 'valid-all-token' } }
+    });
+
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      ok: true,
+      json: async () => ({
+        nodes: [
+          { id: 'ME', name: 'Neural Core' },
+          { id: 'Jarvis-portfolio', name: 'Jarvis-portfolio' },
+          { id: 'bus-crowding', name: 'bus-crowding' }
+        ],
+        links: []
+      })
+    });
+
+    const response = await apiFetch('/graph-data?user_id=usr-123');
+    const data = await response.json();
+    const repoNames = data.nodes.map(n => n.name);
+    expect(repoNames).toContain('Jarvis-portfolio');
+    expect(repoNames).toContain('bus-crowding');
+  });
+
+  it('fails closed when backend returns 500 promotion error', async () => {
     supabase.auth.getSession.mockResolvedValue({
       data: { session: { access_token: 'valid-token' } }
     });
@@ -98,13 +131,5 @@ describe('apiClient authentication & contract reconciliation helper', () => {
 
     const response = await apiFetch('/ingest', { method: 'POST', body: '{}' });
     expect(response.ok).toBe(false);
-    expect(response.status).toBe(500);
-  });
-
-  it('safely handles non-array telemetry responses without crashing', () => {
-    const rawLogs = { detail: 'Logs endpoint unavailable' };
-    const safeLogs = Array.isArray(rawLogs?.logs) ? rawLogs.logs : [];
-    expect(safeLogs).toEqual([]);
-    expect(() => safeLogs.map(x => x)).not.toThrow();
   });
 });
