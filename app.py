@@ -75,7 +75,8 @@ app.add_middleware(
 class SearchRequest(BaseModel):
     query: str
     top_k: Optional[int] = 5
-    repo_filter: Optional[str] = None  # Filter by specific repo
+    repo_filter: Optional[str] = None  # Filter by specific repo name
+    repository_id: Optional[str] = None  # Filter by specific repository_id (UUID)
     history: Optional[list] = []  # List of dicts for multi-turn chat context
     user_id: Optional[str] = None
 
@@ -132,24 +133,75 @@ def get_embedding(text: str) -> list:
         return None
 
 # Search endpoint
+def validate_repository_ownership(user_id: str, repository_id: Optional[str] = None, repo_name: Optional[str] = None):
+    """
+    Validates that the supplied repository_id or repo_name belongs strictly to user_id.
+    Returns (verified_repo_id, verified_repo_name, verified_active_version).
+    If invalid or cross-user, raises HTTPException 400.
+    """
+    if not repository_id and not repo_name:
+        return None, None, None
+
+    if repository_id:
+        # Check user_repositories by ID & user_id
+        res = db.table("user_repositories").select("id, repository_name, repo_name, active_index_version").eq("id", repository_id).eq("user_id", user_id).execute()
+        if res.data and len(res.data) > 0:
+            row = res.data[0]
+            name = row.get("repository_name") or row.get("repo_name")
+            ver = row.get("active_index_version") or "v1"
+            return str(row["id"]), name, ver
+        
+        # Check code_snippets by repository_id & user_id
+        res2 = db.table("code_snippets").select("repository_id, repo_name, index_version").eq("repository_id", repository_id).eq("user_id", user_id).limit(1).execute()
+        if res2.data and len(res2.data) > 0:
+            row = res2.data[0]
+            return str(row.get("repository_id")), row.get("repo_name"), row.get("index_version") or "v1"
+            
+        raise HTTPException(status_code=400, detail="Invalid or unauthorized repository selection.")
+
+    if repo_name:
+        # Check user_repositories by name & user_id
+        res = db.table("user_repositories").select("id, repository_name, repo_name, active_index_version").eq("user_id", user_id).or_(f"repository_name.eq.{repo_name},repo_name.eq.{repo_name}").execute()
+        if res.data and len(res.data) > 0:
+            row = res.data[0]
+            return str(row["id"]), repo_name, row.get("active_index_version") or "v1"
+
+        res2 = db.table("code_snippets").select("repository_id, repo_name, index_version").eq("repo_name", repo_name).eq("user_id", user_id).limit(1).execute()
+        if res2.data and len(res2.data) > 0:
+            row = res2.data[0]
+            return str(row.get("repository_id") or repo_name), repo_name, row.get("index_version") or "v1"
+
+        raise HTTPException(status_code=400, detail="Invalid or unauthorized repository selection.")
+
+    return None, None, None
+
+
 @app.post("/search", response_model=SearchResponse)
-async def search(request: SearchRequest):
+async def search_code(request: SearchRequest):
     """
-    Search codebases using vector similarity + LLM generation
+    Semantic search across indexed code snippets.
+    Supports user isolation, repository-scope isolation, and conversation history.
     """
-    if not db:
-        raise HTTPException(status_code=500, detail="Database not initialized")
+    logger.info(f"🔍 Search request: '{request.query}' | repo_filter: '{request.repo_filter}' | repo_id: '{request.repository_id}' | user: '{request.user_id}'")
+
     if not request.user_id:
         raise HTTPException(status_code=401, detail="Authentication required: missing user context.")
 
     start_time = time.time()
     
-    # Check SQLite Cache (0 LLM Tokens)
-    cached = get_cached_query(request.query, request.repo_filter or request.repository_id)
+    # 1. Validate ownership & resolve verified repository scope
+    verified_repo_id, verified_repo_name, verified_active_version = validate_repository_ownership(
+        user_id=request.user_id,
+        repository_id=request.repository_id,
+        repo_name=request.repo_filter
+    )
+
+    # Check cache first
+    cached = get_cached_query(request.query, verified_repo_id or verified_repo_name)
     if cached:
-        logger.info("🟢 Cache hit! Returning instant response (0 tokens)")
-        latency_ms = (time.time() - start_time) * 1000
-        log_search(request.query, request.repo_filter, cached["confidence"], latency_ms)
+        logger.info("⚡ Returning cached answer")
+        latency_ms = int((time.time() - start_time) * 1000)
+        log_search(request.query, verified_repo_name or verified_repo_id, cached["confidence"], latency_ms)
         return SearchResponse(
             answer=cached["answer"],
             sources=cached["sources"],
@@ -173,39 +225,36 @@ async def search(request: SearchRequest):
             "p_user_id": request.user_id
         }
 
-        scoped_repo_name = request.repo_filter
-        scoped_repo_id = request.repository_id
-
-        if scoped_repo_id:
-            rpc_params["p_repository_id"] = scoped_repo_id
+        if verified_repo_id:
+            rpc_params["p_repository_id"] = verified_repo_id
+        if verified_active_version:
+            rpc_params["p_index_version"] = verified_active_version
         
-        search_query = db.rpc("search_code_snippets", rpc_params)
-        
-        if scoped_repo_name:
-            search_query = search_query.eq("repo_name", scoped_repo_name)
-        
-        vector_results = search_query.execute()
+        search_rpc = db.rpc("search_code_snippets", rpc_params)
+        res = search_rpc.execute()
+        vector_results_data = res.data or []
         
         # Step 2.5: Keyword Search (Exact Match Fallback)
         import re
         stop_words = {"how", "do", "did", "i", "we", "you", "what", "is", "where", "can", "find", "the", "a", "an", "to", "for", "in", "of", "and", "or", "my", "code", "file", "project", "this", "app", "use", "make", "create", "show", "tell", "give", "me", "get", "please", "about"}
         keywords = [word for word in re.findall(r'\b\w+\b', request.query.lower()) if word not in stop_words and len(word) > 2]
         
-        # Sort keywords by length descending (longer words are usually more specific like "predictor" vs "grid")
+        # Sort keywords by length descending
         keywords.sort(key=len, reverse=True)
         
         keyword_results = []
         if keywords:
             top_keywords = keywords[:3]
             for kw in top_keywords:
-                kw_search = db.table("code_snippets").select("id, repo_name, file_path, language, code_content, source_url, repository_id")
-                if request.user_id:
-                    kw_search = kw_search.eq("user_id", request.user_id)
-                if scoped_repo_name:
-                    kw_search = kw_search.eq("repo_name", scoped_repo_name)
-                if scoped_repo_id:
-                    kw_search = kw_search.eq("repository_id", scoped_repo_id)
+                kw_search = db.table("code_snippets").select("id, repo_name, file_path, language, code_content, source_url, repository_id, index_version").eq("user_id", request.user_id)
+                if verified_repo_id:
+                    kw_search = kw_search.eq("repository_id", verified_repo_id)
+                elif verified_repo_name:
+                    kw_search = kw_search.eq("repo_name", verified_repo_name)
                 
+                if verified_active_version:
+                    kw_search = kw_search.eq("index_version", verified_active_version)
+
                 kw_search = kw_search.ilike("code_content", f"%{kw}%")
                 kw_res = kw_search.limit(request.top_k).execute()
                 if kw_res.data:
@@ -221,7 +270,7 @@ async def search(request: SearchRequest):
                 merged_data.append(row)
                 seen_ids.add(row["id"])
                 
-        for row in vector_results.data:
+        for row in vector_results_data:
             if row["id"] not in seen_ids:
                 merged_data.append(row)
                 seen_ids.add(row["id"])
@@ -241,8 +290,8 @@ async def search(request: SearchRequest):
         # Calculate Confidence Score
         confidence = 0
         max_sim = 0
-        if vector_results.data:
-            max_sim = max([float(row.get("similarity", 0)) for row in vector_results.data], default=0)
+        if vector_results_data:
+            max_sim = max([float(row.get("similarity", 0)) for row in vector_results_data], default=0)
         
         # Scale similarity (usually 0.5 to 0.8) to a percentage
         base_conf = max_sim * 110
@@ -314,7 +363,13 @@ FOLLOW_UPS:
             
             if not current_key:
                 logger.error("❌ HF_TOKEN is missing from environment variables!")
-                return {"answer": "Error: AI Brain (HF_TOKEN) is not configured on the server. Please check environment variables.", "confidence": 0, "sources": []}
+                return SearchResponse(
+                    answer="Error: AI Brain (HF_TOKEN) is not configured on the server. Please check environment variables.",
+                    sources=sources,
+                    query=request.query,
+                    follow_ups=[],
+                    confidence=0
+                )
             url = "https://router.huggingface.co/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {current_key}",
@@ -479,16 +534,57 @@ async def ingest_repo(request: IngestRequest):
 @app.get("/user-repos")
 async def get_user_repos(user_id: str):
     """
-    Fetch unique repository names indexed for this user.
+    Fetch authoritative repository list for this user from user_repositories.
+    Falls back gracefully to code_snippets if user_repositories table is unpopulated.
     """
     if not db:
         raise HTTPException(status_code=500, detail="Database not connected")
     
     try:
-        # Get unique repo names for the user
-        result = db.table("code_snippets").select("repo_name").eq("user_id", user_id).execute()
-        repos = sorted(list(set([r["repo_name"] for r in result.data])))
-        return {"repos": repos}
+        # 1. Authoritative lookup from user_repositories
+        res_repos = db.table("user_repositories").select(
+            "id, repository_name, repo_name, canonical_url, active_index_version, status"
+        ).eq("user_id", user_id).execute()
+
+        repos_data = res_repos.data or []
+        if repos_data:
+            repositories = []
+            repos_names = []
+            for r in repos_data:
+                name = r.get("repository_name") or r.get("repo_name")
+                if not name:
+                    continue
+                repos_names.append(name)
+                repositories.append({
+                    "id": str(r.get("id")),
+                    "repository_name": name,
+                    "repo_name": name,
+                    "canonical_url": r.get("canonical_url", ""),
+                    "active_index_version": r.get("active_index_version", "v1"),
+                    "status": r.get("status", "ready")
+                })
+            repos = sorted(list(set(repos_names)))
+            return {"repos": repos, "repositories": repositories}
+
+        # Fallback to code_snippets if user_repositories empty
+        result = db.table("code_snippets").select("repo_name, repository_id").eq("user_id", user_id).execute()
+        repo_map = {}
+        for r in (result.data or []):
+            name = r.get("repo_name")
+            r_id = r.get("repository_id")
+            if name and name not in repo_map:
+                repo_map[name] = {
+                    "id": str(r_id or name),
+                    "repository_name": name,
+                    "repo_name": name,
+                    "canonical_url": "",
+                    "active_index_version": "v1",
+                    "status": "ready"
+                }
+
+        repos = sorted(list(repo_map.keys()))
+        repositories = list(repo_map.values())
+        return {"repos": repos, "repositories": repositories}
     except Exception as e:
         logger.error(f"❌ Failed to fetch user repos: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -510,14 +606,23 @@ async def delete_repo(repo_name: str, user_id: str):
 @app.get("/graph-data")
 async def get_graph_data(user_id: str, repo_name: Optional[str] = None, repository_id: Optional[str] = None):
     """
-    Generate graph nodes and links for the user's codebase, optionally scoped by repository.
+    Generate graph nodes and links for the user's codebase, strictly scoped to verified repository when requested.
     """
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     try:
+        verified_repo_id, verified_repo_name, verified_ver = validate_repository_ownership(
+            user_id=user_id,
+            repository_id=repository_id,
+            repo_name=repo_name
+        )
+
         query = db.table("code_snippets").select("repo_name, file_path, repository_id").eq("user_id", user_id)
-        if repository_id:
-            query = query.eq("repository_id", repository_id)
-        elif repo_name:
-            query = query.eq("repo_name", repo_name)
+        if verified_repo_id:
+            query = query.eq("repository_id", verified_repo_id)
+        elif verified_repo_name:
+            query = query.eq("repo_name", verified_repo_name)
             
         result = query.execute()
         
@@ -549,9 +654,11 @@ async def get_graph_data(user_id: str, repo_name: Optional[str] = None, reposito
                 seen_files.add(file_id)
                 
         return {"nodes": nodes, "links": links}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to generate graph: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"nodes": [], "links": []}
 
 
 # Root endpoint
