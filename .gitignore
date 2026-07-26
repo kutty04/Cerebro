@@ -7,3 +7,5 @@ coderag_telemetry.db
 .DS_Store
 node_modules/
 dist/
+*.png
+docs/screenshots/
