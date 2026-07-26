@@ -240,7 +240,7 @@ class CodeIndexer:
 
     def get_serverless_embedding(self, text: str) -> List[float]:
         """Get embeddings from Hugging Face Inference API"""
-        hf_token = os.getenv("HF_TOKEN")
+        hf_token = (os.getenv("HF_TOKEN") or "").strip()
         model_id = "sentence-transformers/all-MiniLM-L6-v2"
         api_url = f"https://router.huggingface.co/hf-inference/models/{model_id}/pipeline/feature-extraction"
         headers = {}

@@ -74,11 +74,20 @@ except Exception as e:
     logger.error(f"💥 Failed to initialize FastAPI: {e}")
     raise
 
+def get_hf_token() -> str:
+    """Reads and safely trims HF_TOKEN without exposing secret content."""
+    raw = os.getenv("HF_TOKEN") or ""
+    return raw.strip()
+
 @app.on_event("startup")
 async def startup_event():
     global db
     logger.info("🚀 Starting CodeRAG API initialization...")
     
+    # Safe startup observability for HF_TOKEN configuration
+    hf_configured = bool(get_hf_token())
+    logger.info(f"HF generation configured: {hf_configured}")
+
     # 1. Init Telemetry DB
     try:
         init_db()
@@ -152,7 +161,7 @@ class HealthResponse(BaseModel):
 # Health check endpoint
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    is_hf_ready = os.getenv("HF_TOKEN") is not None
+    is_hf_ready = bool(get_hf_token())
     return {
         "status": "ok",
         "embedder_ready": is_hf_ready, # In serverless mode, if HF is ready, embedder is ready
@@ -172,7 +181,7 @@ def _fallback_encode(text: str) -> list:
     return unit_vec.tolist()
 
 def get_embedding(text: str) -> list:
-    hf_token = os.getenv("HF_TOKEN")
+    hf_token = get_hf_token()
     model_id = "sentence-transformers/all-MiniLM-L6-v2"
     api_url = f"https://router.huggingface.co/hf-inference/models/{model_id}/pipeline/feature-extraction"
     headers = {}
@@ -455,10 +464,9 @@ FOLLOW_UPS:
 
         import requests
         try:
-            hf_env_token = os.getenv("HF_TOKEN")
-            current_key = hf_env_token.strip() if hf_env_token else ""
+            hf_token = get_hf_token()
             
-            if not current_key:
+            if not hf_token:
                 logger.info("ℹ️ HF_TOKEN not set; constructing retrieval summary response.")
                 retrieved_files = list(set([s.get("file", "code file") for s in sources]))
                 file_summary = ", ".join(retrieved_files[:5]) if retrieved_files else "indexed snippets"
@@ -466,7 +474,7 @@ FOLLOW_UPS:
             else:
                 url = "https://router.huggingface.co/v1/chat/completions"
                 headers = {
-                    "Authorization": f"Bearer {current_key}",
+                    "Authorization": f"Bearer {hf_token}",
                     "Content-Type": "application/json"
                 }
                 payload = {
@@ -481,11 +489,11 @@ FOLLOW_UPS:
                 if res.status_code == 200:
                     final_answer = res.json()["choices"][0]["message"]["content"]
                 else:
-                    logger.error(f"HF Router Error: {res.text}")
-                    final_answer = f"Cerebro link established! Snippets retrieved, but the AI router rejected the request (Status {res.status_code})."
+                    logger.error(f"HF Router Error: Status {res.status_code}")
+                    final_answer = f"Cerebro link established! Retrieved {len(sources)} matching code snippets, but AI response generation is currently unavailable (Status {res.status_code})."
         except Exception as api_e:
             logger.error(f"HF Router Connection Error: {type(api_e).__name__}")
-            final_answer = f"Cerebro link established! Snippets retrieved, but the server could not connect to the AI router."
+            final_answer = f"Cerebro link established! Retrieved {len(sources)} matching code snippets, but AI response generation is currently unavailable."
 
         # Parse out follow-up questions
         answer_text = final_answer.strip()
