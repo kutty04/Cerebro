@@ -159,6 +159,8 @@ class HealthResponse(BaseModel):
     hf_ready: bool
     mode: str
 
+import hmac
+
 # Health check endpoint
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -170,6 +172,27 @@ async def health_check():
         "hf_ready": is_hf_ready,
         "mode": "serverless"
     }
+
+# Keepalive ping endpoint for cron-job.org
+@app.get("/keepalive")
+async def keepalive_ping(x_keepalive_key: Optional[str] = Header(None, alias="X-Keepalive-Key")):
+    secret = (os.getenv("KEEPALIVE_SECRET") or "").strip()
+    if not secret or not x_keepalive_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not hmac.compare_digest(x_keepalive_key.encode("utf-8"), secret.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not db:
+        logger.error("❌ Keepalive DB check failed: DatabaseNotConnected")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        db.table("user_repositories").select("id").limit(1).execute()
+        return {"status": "ok", "database": "reachable"}
+    except Exception as e:
+        logger.error(f"❌ Keepalive DB query failed: {type(e).__name__}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
 import requests
 def _fallback_encode(text: str) -> list:
     import hashlib
